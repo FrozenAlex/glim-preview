@@ -26,6 +26,10 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     outputs:
       tag: ${{ steps.package.outputs.tag }}
     steps:
@@ -73,6 +77,31 @@ jobs:
           python @arguments
           if ($LASTEXITCODE) { throw 'VPM packaging failed.' }
 
+      - name: Attest release files and native DLL
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ github.workspace }}/dist/*.zip
+            ${{ github.workspace }}/dist/package.json
+            ${{ github.workspace }}/dist/SHA256SUMS
+            ${{ runner.temp }}/native/glim_preview_addon_012_v1.dll
+          create-storage-record: false
+
+      - name: Include and verify provenance bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          Copy-Item -LiteralPath $env:ATTESTATION_BUNDLE -Destination dist/provenance.sigstore.json
+          $subjects = @(Get-ChildItem dist -File | Where-Object Name -ne 'provenance.sigstore.json' | ForEach-Object FullName)
+          $subjects += Join-Path $env:RUNNER_TEMP 'native/glim_preview_addon_012_v1.dll'
+          foreach ($subject in $subjects) {
+            gh attestation verify $subject --bundle dist/provenance.sigstore.json --repo $env:RELEASE_REPOSITORY --signer-workflow "$env:RELEASE_REPOSITORY/.github/workflows/release.yml" --source-digest $env:GITHUB_SHA --deny-self-hosted-runners
+            if ($LASTEXITCODE) { throw "Provenance verification failed: $subject" }
+          }
+
       - name: Upload release files
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -92,6 +121,16 @@ jobs:
         with:
           name: vpm-package
           path: dist
+
+      - name: Verify downloaded release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          foreach ($asset in (Get-ChildItem dist -File | Where-Object Name -ne 'provenance.sigstore.json')) {
+            gh attestation verify $asset.FullName --bundle dist/provenance.sigstore.json --repo $env:RELEASE_REPOSITORY --signer-workflow "$env:RELEASE_REPOSITORY/.github/workflows/release.yml" --source-digest $env:GITHUB_SHA --deny-self-hosted-runners
+            if ($LASTEXITCODE) { throw "Provenance verification failed: $($asset.Name)" }
+          }
 
       - name: Create and publish release
         env:

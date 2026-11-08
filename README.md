@@ -96,5 +96,20 @@ Update `package.json`'s version, commit and push, then run **Actions → Build R
 with **publish** enabled. Alternatively, push a matching version tag such as
 `v0.1.1`. Leaving **publish** disabled builds downloadable workflow artifacts only.
 The workflow rebuilds the patched Rust renderer and publishes a VPM ZIP, manifest,
-and checksum. The VPM listing checks for releases hourly; its **Build Repo Listing**
+checksum, and signed build provenance bundle. The VPM listing checks for releases hourly; its **Build Repo Listing**
 workflow can also be run manually for an immediate refresh.
+
+## Verify a release
+
+New workflow builds attest the ZIP, manifest, checksum file, and native DLL using
+[GitHub artifact attestations](https://github.com/actions/attest). With GitHub CLI
+installed, replace `VERSION` with the downloaded version and run:
+
+```powershell
+gh attestation verify ./com.frozenalex.glim-preview-VERSION.zip --repo FrozenAlex/glim-preview --signer-workflow FrozenAlex/glim-preview/.github/workflows/release.yml --deny-self-hosted-runners
+```
+
+You can verify the extracted native DLL with the same command using its file path.
+The release also includes `provenance.sigstore.json`; pass
+`--bundle ./provenance.sigstore.json` to use that bundle instead of fetching it
+from GitHub. The original `0.1.0` release predates attestations.

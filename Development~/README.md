@@ -73,6 +73,15 @@ are never overwritten. If uploading fails and leaves a draft, delete that draft
 before retrying. The publisher creates a draft, uploads every asset, and only then
 makes it public.
 
+After packaging, `actions/attest` generates SLSA build provenance for the ZIP,
+external manifest, checksum file, and freshly built DLL. The action is pinned to
+a commit and uses GitHub OIDC; no signing key secret is required. Only the build
+job receives `id-token: write` and `attestations: write`. The Sigstore bundle is
+included as `provenance.sigstore.json` in the workflow artifact and release.
+Both the build and publisher verify the signatures, repository, signer workflow,
+source commit, and GitHub-hosted runner identity before proceeding. Build-only
+runs generate attestations too; existing releases are not retroactively signed.
+
 `FrozenAlex/vpm` tracks `FrozenAlex/glim-preview` through its `source.json`.
 Its listing workflow refreshes hourly, on source changes, or manually. Scheduled
 runs can be delayed by GitHub, and inactive public repositories can have schedules
