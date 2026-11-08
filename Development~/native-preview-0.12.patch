@@ -16,28 +16,28 @@ index b8712ff..35af251 100644
  }
 +
 diff --git a/shaders/initialize_preview.slang b/shaders/initialize_preview.slang
-index a9dacc4..b520452 100644
+index a9dacc4..19c6d06 100644
 --- a/shaders/initialize_preview.slang
 +++ b/shaders/initialize_preview.slang
-@@ -7,11 +7,12 @@ PushConstants Push;
+@@ -7,11 +7,13 @@ PushConstants Push;
  
  struct PushConstants
  {
 -    float3 cameraPosition;
 -    float fov;
--
++    // std430 scalar-array stride is 4 bytes: six vectors occupy 72, not 96.
++    float rays[18];
++}
+ 
 -    float3 cameraDirection;
 -    float pad0;
-+    float3 origin; float originPad;
-+    float3 originDx; float originDxPad;
-+    float3 originDy; float originDyPad;
-+    float3 direction; float directionPad;
-+    float3 directionDx; float directionDxPad;
-+    float3 directionDy; float directionDyPad;
++float3 CameraVector(uint offset)
++{
++    return float3(Push.rays[offset], Push.rays[offset + 1], Push.rays[offset + 2]);
  }
  
  [shader("compute")]
-@@ -28,22 +29,10 @@ void main(uint3 threadID: SV_DispatchThreadID)
+@@ -28,22 +30,10 @@ void main(uint3 threadID: SV_DispatchThreadID)
          return;
      }
  
@@ -58,20 +58,20 @@ index a9dacc4..b520452 100644
      Ray ray;
 -    ray.P = Push.cameraPosition;
 -    ray.D = normalize(camForward + ndc.x * camRight + ndc.y * camUp);
-+    ray.P = Push.origin + uv.x * Push.originDx + uv.y * Push.originDy;
-+    ray.D = normalize(Push.direction + uv.x * Push.directionDx + uv.y * Push.directionDy);
++    ray.P = CameraVector(0) + uv.x * CameraVector(3) + uv.y * CameraVector(6);
++    ray.D = normalize(CameraVector(9) + uv.x * CameraVector(12) + uv.y * CameraVector(15));
      ray.tMin = 0.001;
      ray.tMax = RAY_MAX;
  
 diff --git a/shaders/preview.slang b/shaders/preview.slang
-index 8b042a4..d2f9677 100644
+index 8b042a4..57ddf79 100644
 --- a/shaders/preview.slang
 +++ b/shaders/preview.slang
 @@ -13,6 +13,9 @@ struct PushConstants
      uint width;
      uint height;
      uint bounceCount;
-+    uint64_t lightsAddress;
++    Light* lights;
 +    float indirectIntensity;
 +    uint pad;
  };
@@ -112,7 +112,7 @@ index 8b042a4..d2f9677 100644
 -            float3 current = ShadeLightDirect(Lights[lightIndex], positionWS, normalWS, xiLight, throughput, L, false);
 -            float NoL = saturate(dot(L, normalWS));
 -            color.rgb += current * NoL;
-+            float3 current = ShadeLightDirect(((Light*)Push.lightsAddress)[lightIndex], positionWS, normalWS, xiLight, throughput, L, false);
++            float3 current = ShadeLightDirect(Push.lights[lightIndex], positionWS, normalWS, xiLight, throughput, L, false);
 +            float3 NoL = saturate(dot(L, normalWS));
 +            // The first surface receives direct light; later surfaces contribute GI.
 +            if (bounceIndex == 0)
@@ -160,7 +160,7 @@ index 8b042a4..d2f9677 100644
      previous.a = 1.0;
 diff --git a/shaders/preview_surface.slang b/shaders/preview_surface.slang
 new file mode 100644
-index 0000000..66fb3ea
+index 0000000..9f2cac5
 --- /dev/null
 +++ b/shaders/preview_surface.slang
 @@ -0,0 +1,38 @@
@@ -173,7 +173,7 @@ index 0000000..66fb3ea
 +    float4 normal;
 +    float4 emission;
 +};
-+struct PushConstants { uint64_t outputAddress; uint width; uint height; }
++struct PushConstants { SurfaceSample* output; uint width; uint height; }
 +[[vk::push_constant]] PushConstants Push;
 +
 +[shader("compute")]
@@ -200,7 +200,7 @@ index 0000000..66fb3ea
 +        // it and primary emission so neither is smoothed by the neural filter.
 +        result.lighting.rgb = max(raw.rgb - result.emission.rgb, 0) / max(result.albedo.rgb, 1e-6);
 +    }
-+    ((SurfaceSample*)Push.outputAddress)[coords.y * Push.width + coords.x] = result;
++    Push.output[coords.y * Push.width + coords.x] = result;
 +}
 diff --git a/src/bindings.rs b/src/bindings.rs
 index 64c1702..e8450d2 100644
@@ -307,10 +307,10 @@ index 64c1702..e8450d2 100644
      let result = catch_unwind(AssertUnwindSafe(|| {
          // Take ownership back from the pointer and let Box drop it
 diff --git a/src/camera.rs b/src/camera.rs
-index c3f6374..418547d 100644
+index c3f6374..b2140e6 100644
 --- a/src/camera.rs
 +++ b/src/camera.rs
-@@ -10,29 +10,36 @@ pub struct Camera {
+@@ -10,30 +10,34 @@ pub struct Camera {
  }
  
  #[repr(C)]
@@ -321,55 +321,54 @@ index c3f6374..418547d 100644
 -
 -    pub camera_direction: Vector3,
 -    pub pad: u32,
-+    pub origin: Vector3,
-+    pub origin_pad: f32,
-+    pub origin_dx: Vector3,
-+    pub origin_dx_pad: f32,
-+    pub origin_dy: Vector3,
-+    pub origin_dy_pad: f32,
-+    pub direction: Vector3,
-+    pub direction_pad: f32,
-+    pub direction_dx: Vector3,
-+    pub direction_dx_pad: f32,
-+    pub direction_dy: Vector3,
-+    pub direction_dy_pad: f32,
++    // Scalar-array layout matches Slang's float[18], without float3 padding.
++    // Order: origin, origin_dx, origin_dy, direction, direction_dx, direction_dy.
++    pub rays: [[f32; 3]; 6],
  }
  
- impl Camera {
+-impl Camera {
 -    pub fn make_push_constants(&self) -> InitializePreviewPushConstants {
 -        let x = self.yaw.sin() * self.pitch.cos();
 -        let y = self.pitch.sin();
 -        let z = self.yaw.cos() * self.pitch.cos();
 -
 -        let camera_direction = Vector3::new(x, y, z).normalize();
--
++impl InitializePreviewPushConstants {
++    pub fn from_vectors(vectors: [Vector3; 6]) -> Self {
++        Self { rays: vectors.map(|v| [v.x, v.y, v.z]) }
++    }
++}
+ 
 -        let fov_half_tan = (self.fov.to_radians() * 0.5).tan();
--
++// Reserve the future upstream RayTracingData (48) and uint2 resolution (8).
++// This prepares the layout; the upstream revision and ABI are not ported here.
++const _: () = assert!(size_of::<InitializePreviewPushConstants>() + 48 + 8 <= 128);
+ 
+-        InitializePreviewPushConstants {
+-            camera_position: self.position,
+-            fov_half_tan,
+-            camera_direction,
+-            pad: 0,
+-        }
++impl Camera {
 +    pub fn make_push_constants(&self, aspect: f32) -> InitializePreviewPushConstants {
 +        let forward = self.get_forward().normalize();
 +        let right = forward.cross(Vector3::UP).normalize();
 +        let up = right.cross(forward);
 +        let tangent = (self.fov.to_radians() * 0.5).tan();
-         InitializePreviewPushConstants {
--            camera_position: self.position,
--            fov_half_tan,
--            camera_direction,
--            pad: 0,
-+            origin: self.position, origin_pad: 0.0,
-+            origin_dx: Vector3::ZERO, origin_dx_pad: 0.0,
-+            origin_dy: Vector3::ZERO, origin_dy_pad: 0.0,
-+            direction: forward - right * (aspect * tangent) + up * tangent,
-+            direction_pad: 0.0,
-+            direction_dx: right * (2.0 * aspect * tangent), direction_dx_pad: 0.0,
-+            direction_dy: up * (-2.0 * tangent), direction_dy_pad: 0.0,
-         }
++        InitializePreviewPushConstants::from_vectors([
++            self.position, Vector3::ZERO, Vector3::ZERO,
++            forward - right * (aspect * tangent) + up * tangent,
++            right * (2.0 * aspect * tangent), up * (-2.0 * tangent),
++        ])
      }
  
+     pub fn look_at(&mut self, target: Vector3) {
 diff --git a/src/lib.rs b/src/lib.rs
-index 8aeb13a..d9763d6 100644
+index 8aeb13a..061b91d 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,5 +1,12 @@
+@@ -1,5 +1,14 @@
  #![allow(unsafe_op_in_unsafe_fn)]
  
 +mod preview_updates;
@@ -378,11 +377,13 @@ index 8aeb13a..d9763d6 100644
 +mod preview_geometry;
 +mod preview_scene;
 +mod preview_embedded;
++#[cfg(test)]
++mod preview_shader_contract;
 +
  use ash::vk::{self, Handle};
  use std::io::{self, Write};
  use std::mem;
-@@ -85,6 +92,10 @@ pub struct Glim {
+@@ -85,6 +94,10 @@ pub struct Glim {
      pub config: GlimConfig,
      pub vk: VulkanContext,
      pub window: *mut GLFWwindow,
@@ -393,7 +394,7 @@ index 8aeb13a..d9763d6 100644
  
      pub meshes: [Mesh; GEOMETRIES_VARIANTS],
  
-@@ -106,6 +117,7 @@ pub struct Glim {
+@@ -106,6 +119,7 @@ pub struct Glim {
      pub camera: Camera,
  
      pub preview_shader: ComputeShader,
@@ -401,7 +402,7 @@ index 8aeb13a..d9763d6 100644
      pub init_from_camera_shader: ComputeShader,
      pub preview_initialized: bool,
  
-@@ -151,6 +163,9 @@ impl Drop for Glim {
+@@ -151,6 +165,9 @@ impl Drop for Glim {
          if !self.preview_shader.pipeline.is_null() {
              self.preview_shader.destroy(&self.vk);
          }
@@ -411,7 +412,7 @@ index 8aeb13a..d9763d6 100644
          self.gpu_mesh.destroy(&self.vk);
  
          if !self.bvh_nodes.buffer.is_null() {
-@@ -232,7 +247,8 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
+@@ -232,7 +249,8 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
      let vk = &mut app.vk;
      let shader = &app.init_from_camera_shader;
  
@@ -421,7 +422,7 @@ index 8aeb13a..d9763d6 100644
  
      let constants_bytes = as_bytes(&push);
  
-@@ -299,11 +315,17 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
+@@ -299,11 +317,17 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
          vk.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
      }
  
@@ -440,7 +441,7 @@ index 8aeb13a..d9763d6 100644
      for mesh in &app.meshes {
          let message = format!(
              "Geometries Group Transparent: {}, Cast Shadows: {}, Vertices: {} Triangles: {}",
-@@ -326,16 +348,19 @@ fn initialize_render(app: &mut Glim) {
+@@ -326,16 +350,19 @@ fn initialize_render(app: &mut Glim) {
  
      // upload lights
      if app.cpu_lights.len() > 0 {
@@ -470,7 +471,7 @@ index 8aeb13a..d9763d6 100644
  
          app.gpu_lights = Buffer::new(
              &app.vk,
-@@ -421,8 +446,16 @@ fn initialize_render(app: &mut Glim) {
+@@ -421,8 +448,16 @@ fn initialize_render(app: &mut Glim) {
          emissions.push(desc);
      }
  
@@ -489,7 +490,7 @@ index 8aeb13a..d9763d6 100644
  
      const STAGING_RESOLUTION: u64 = 1024;
      let mut staging_buffer = Buffer::empty(
-@@ -439,8 +472,10 @@ fn initialize_render(app: &mut Glim) {
+@@ -439,8 +474,10 @@ fn initialize_render(app: &mut Glim) {
      for index in 0..app.groups.len() {
          let group = &app.groups[index];
  
@@ -502,7 +503,7 @@ index 8aeb13a..d9763d6 100644
      }
  
      // free
-@@ -452,6 +487,7 @@ fn initialize_render(app: &mut Glim) {
+@@ -452,6 +489,7 @@ fn initialize_render(app: &mut Glim) {
  
      app.albedo_array = albedo_array;
      app.emission_array = emission_array;
@@ -510,7 +511,7 @@ index 8aeb13a..d9763d6 100644
  
      if app.light_cookies.len() == 0 {
          let dummy_cookie = TexturePixelsData {
-@@ -560,8 +596,14 @@ fn initialize_render(app: &mut Glim) {
+@@ -560,8 +598,14 @@ fn initialize_render(app: &mut Glim) {
          jitter_barycentrics: app.config.antialiasing as u32,
      };
  
@@ -526,7 +527,7 @@ index 8aeb13a..d9763d6 100644
      } else {
          render_lightmaps(app)
      }
-@@ -589,6 +631,88 @@ fn format_window_title(
+@@ -589,6 +633,88 @@ fn format_window_title(
      );
  }
  
@@ -615,7 +616,7 @@ index 8aeb13a..d9763d6 100644
  fn render_preview(app: &mut Glim) {
      let window = app.window;
  
-@@ -630,7 +754,7 @@ fn render_preview(app: &mut Glim) {
+@@ -630,7 +756,7 @@ fn render_preview(app: &mut Glim) {
      let mut bake_complete_printed = false;
  
      unsafe {
@@ -624,7 +625,7 @@ index 8aeb13a..d9763d6 100644
              glfwPollEvents();
  
              Log::progress(
-@@ -669,6 +793,8 @@ fn render_preview(app: &mut Glim) {
+@@ -669,6 +795,8 @@ fn render_preview(app: &mut Glim) {
  
              update_camera(app, delta_time);
  
@@ -633,7 +634,7 @@ index 8aeb13a..d9763d6 100644
              if !app.preview_initialized {
                  app.preview_push_constants.sample_index = 0;
                  bake_start_time = std::time::Instant::now();
-@@ -726,72 +852,17 @@ fn render_preview(app: &mut Glim) {
+@@ -726,72 +854,17 @@ fn render_preview(app: &mut Glim) {
      }
  
      unsafe {
@@ -708,7 +709,7 @@ index 8aeb13a..d9763d6 100644
          if app.preview_push_constants.sample_index == 0 {
              update_visibility_from_camera(app, cmd);
              app.preview_initialized = true;
-@@ -822,20 +893,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+@@ -822,20 +895,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
  
          let diffuse = &mut app.render_target.diffuse;
  
@@ -740,7 +741,7 @@ index 8aeb13a..d9763d6 100644
  
          if app.preview_push_constants.sample_index < app.preview_push_constants.max_samples {
              let shader = &app.preview_shader;
-@@ -869,6 +937,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+@@ -869,6 +939,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
              app.preview_push_constants.sample_index += 1;
          }
  
@@ -813,7 +814,7 @@ index 8aeb13a..d9763d6 100644
          let swapchain_image = &app.vk.swapchain.frames[image_index as usize];
  
          let vk = &app.vk.device;
-@@ -1087,6 +1221,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
+@@ -1087,6 +1223,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
          let max_samples = app.config.direct_emission_samples;
          let bounce_count = app.config.bounce_count;
          app.preview_push_constants = PreviewPushConstants {
@@ -823,7 +824,7 @@ index 8aeb13a..d9763d6 100644
              lights_count: app.cpu_lights.len() as u32,
              sample_index: 0,
              width: width,
-@@ -1121,7 +1258,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
+@@ -1121,7 +1260,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
          r != 0 || g != 0 || b != 0
      }
  
@@ -832,7 +833,7 @@ index 8aeb13a..d9763d6 100644
          let mut extract = |vertices: &[Vertex], indices: &[u32]| {
              for primitive_id in 0..(indices.len() / 3) {
                  let i0 = indices[primitive_id * 3 + 0] as usize;
-@@ -1218,11 +1355,15 @@ impl LightmapGroup {
+@@ -1218,11 +1357,15 @@ impl LightmapGroup {
  
  impl Glim {
      pub fn new(config: GlimConfig, output_dir: PathBuf) -> Glim {
@@ -849,7 +850,7 @@ index 8aeb13a..d9763d6 100644
              window_extensions: Vec::new(),
          };
  
-@@ -1239,7 +1380,7 @@ impl Glim {
+@@ -1239,7 +1382,7 @@ impl Glim {
          let mut vk = VulkanContext::new(&vulkan_config, create_surface_callback);
          println!("Vulkan Initialized");
  
@@ -858,7 +859,7 @@ index 8aeb13a..d9763d6 100644
              vk.create_swapchain(
                  config.preview_settings.width,
                  config.preview_settings.height,
-@@ -1264,6 +1405,9 @@ impl Glim {
+@@ -1264,6 +1407,9 @@ impl Glim {
          let gpu_lights = Buffer::null();
  
          let preview_push_constants = PreviewPushConstants {
@@ -868,7 +869,7 @@ index 8aeb13a..d9763d6 100644
              lights_count: 0,
              sample_index: 0,
              width: 0,
-@@ -1332,9 +1476,14 @@ impl Glim {
+@@ -1332,9 +1478,14 @@ impl Glim {
              vk,
              meshes,
              window: window,
@@ -1034,10 +1035,10 @@ index c7a1d8c..a55185f 100644
      }
 diff --git a/src/preview_bridge.rs b/src/preview_bridge.rs
 new file mode 100644
-index 0000000..6c374fc
+index 0000000..3fc8792
 --- /dev/null
 +++ b/src/preview_bridge.rs
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,252 @@
 +//! Owned, bounded mailboxes between the Unity thread and the Vulkan thread.
 +use std::{collections::BTreeMap, sync::Mutex};
 +use crate::{camera::InitializePreviewPushConstants, math::Vector3};
@@ -1066,12 +1067,10 @@ index 0000000..6c374fc
 +    }
 +
 +    pub fn constants(&self) -> InitializePreviewPushConstants {
-+        InitializePreviewPushConstants {
-+            origin: self.origin, origin_pad: 0.0, origin_dx: self.origin_dx, origin_dx_pad: 0.0,
-+            origin_dy: self.origin_dy, origin_dy_pad: 0.0,
-+            direction: self.direction, direction_pad: 0.0, direction_dx: self.direction_dx, direction_dx_pad: 0.0,
-+            direction_dy: self.direction_dy, direction_dy_pad: 0.0,
-+        }
++        InitializePreviewPushConstants::from_vectors([
++            self.origin, self.origin_dx, self.origin_dy,
++            self.direction, self.direction_dx, self.direction_dy,
++        ])
 +    }
 +}
 +
@@ -1232,9 +1231,8 @@ index 0000000..6c374fc
 +    #[test]
 +    fn view_layout_and_validation() {
 +        assert_eq!(size_of::<PreviewView>(), 84);
-+        assert_eq!(size_of::<InitializePreviewPushConstants>(), 96);
-+        assert_eq!(std::mem::offset_of!(InitializePreviewPushConstants, direction), 48);
-+        assert_eq!(std::mem::offset_of!(InitializePreviewPushConstants, direction_dy), 80);
++        assert_eq!(size_of::<InitializePreviewPushConstants>(), 72);
++        assert_eq!(std::mem::offset_of!(InitializePreviewPushConstants, rays), 0);
 +        assert_eq!(std::mem::offset_of!(PreviewView, revision), 80);
 +        let mut view = PreviewView { origin: Vector3::ZERO, origin_dx: Vector3::ZERO,
 +            origin_dy: Vector3::ZERO, direction: Vector3::new(0.0, 0.0, -1.0),
@@ -1295,10 +1293,10 @@ index 0000000..6c374fc
 +}
 diff --git a/src/preview_denoise.rs b/src/preview_denoise.rs
 new file mode 100644
-index 0000000..ce9054c
+index 0000000..3762f3f
 --- /dev/null
 +++ b/src/preview_denoise.rs
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,239 @@
 +//! OIDN works on demodulated surface lighting; materials/emission stay untouched.
 +use std::{sync::mpsc, thread, time::{Duration, Instant}};
 +use ash::vk::{self, Handle};
@@ -1311,7 +1309,8 @@ index 0000000..ce9054c
 +}
 +
 +#[repr(C)]
-+pub struct SurfacePush { output_address: u64, width: u32, height: u32 }
++pub struct SurfacePush { output_address: vk::DeviceAddress, width: u32, height: u32 }
++const _: () = assert!(size_of::<SurfacePush>() + 48 <= 128);
 +
 +struct Job {
 +    epoch: u64, generation: u64, revision: u32, samples: u32,
@@ -1539,10 +1538,10 @@ index 0000000..ce9054c
 +}
 diff --git a/src/preview_embedded.rs b/src/preview_embedded.rs
 new file mode 100644
-index 0000000..646afe0
+index 0000000..039793b
 --- /dev/null
 +++ b/src/preview_embedded.rs
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,394 @@
 +use std::time::{Duration, Instant};
 +use ash::vk;
 +use ash::vk::Handle;
@@ -1651,19 +1650,36 @@ index 0000000..646afe0
 +    use super::*;
 +    use crate::{bindings::*, math::*, mesh::FfiMesh, preview_bridge::*};
 +
-+    extern "C" fn log(data: Log) { if matches!(data.ty, LogType::Error) { eprintln!("{}", data.message.to_string()); } }
++    static VALIDATION_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++    extern "C" fn log(data: Log) {
++        let message = data.message.to_string();
++        if message.starts_with("ERROR:") {
++            VALIDATION_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        }
++        if matches!(data.ty, LogType::Error) || message.starts_with("ERROR:") || message.starts_with("WARNING:") {
++            eprintln!("{message}");
++        }
++    }
 +    extern "C" fn probes(_: LightprobesReadbackData) {}
 +
 +    #[test]
 +    #[ignore = "requires a Vulkan GPU; run explicitly, without other preview tests"]
 +    fn embedded_gpu_emission_camera_and_resize() {
-+        for hardware in [true, false] { gpu_scene_updates(hardware); }
++        let modes = match std::env::var("GLIM_PREVIEW_GPU_MODE").as_deref() {
++            Ok("hardware") => vec![true],
++            Ok("software") => vec![false],
++            Err(std::env::VarError::NotPresent) => vec![true, false],
++            _ => panic!("GLIM_PREVIEW_GPU_MODE must be hardware or software"),
++        };
++        for hardware in modes { gpu_scene_updates(hardware); }
 +    }
 +
 +    fn gpu_scene_updates(hardware: bool) {
++        VALIDATION_ERRORS.store(0, std::sync::atomic::Ordering::Relaxed);
 +        let config = GlimConfig {
 +            coordinate_system: CoordinateSystem::Default, is_preview: true,
-+            vulkan_validation_layers: false, seams_debug: false, hardware_rt: hardware,
++            vulkan_validation_layers: std::env::var_os("GLIM_PREVIEW_VALIDATE").is_some(),
++            seams_debug: false, hardware_rt: hardware,
 +            throttle_preview_ms: 1, preview_settings: LightmapSettings {
 +                width: 32, height: 32, dilate: false, denoise: false, fix_seams: false, discard: false },
 +            camera_position: Vector3::ZERO, camera_forward: Vector3::FORWARD,
@@ -1733,6 +1749,21 @@ index 0000000..646afe0
 +            view.revision += 1; assert!(app_update_preview_view(view));
 +            let lit = read(view);
 +            assert!(lit.chunks_exact(4).all(|p| p[0] > 1.9 && p[1] < 0.001), "Emission did not update");
++            // Exercise nonzero direction deltas as well as orthographic origin
++            // deltas: both must survive the packed 18-float camera payload.
++            let mut perspective = view;
++            perspective.origin = Vector3::ZERO;
++            perspective.origin_dx = Vector3::ZERO;
++            perspective.origin_dy = Vector3::ZERO;
++            perspective.direction = Vector3::new(-0.5, 0.5, -1.0);
++            perspective.direction_dx = Vector3::new(1.0, 0.0, 0.0);
++            perspective.direction_dy = Vector3::new(0.0, -1.0, 0.0);
++            perspective.revision += 1;
++            assert!(app_update_preview_view(perspective));
++            assert_eq!(read(perspective), lit, "Packed perspective camera changed coverage");
++            view.revision = perspective.revision + 1;
++            assert!(app_update_preview_view(view));
++            assert_eq!(read(view), lit, "Packed orthographic camera changed coverage");
 +            assert!(app_set_preview_denoise(true));
 +            assert_eq!(denoised(view), lit, "Surface denoiser changed primary HDR emission");
 +            assert!(app_set_preview_denoise(false));
@@ -1901,6 +1932,8 @@ index 0000000..646afe0
 +            assert!(read(view)[left+2] > 3.9, "Live emission stopped after a cached refresh");
 +        }));
 +        app_request_cancel(); renderer.join().unwrap(); result.unwrap();
++        assert_eq!(VALIDATION_ERRORS.load(std::sync::atomic::Ordering::Relaxed), 0,
++            "Vulkan validation reported errors (hardware RT: {hardware})");
 +    }
 +}
 diff --git a/src/preview_geometry.rs b/src/preview_geometry.rs
@@ -2494,6 +2527,127 @@ index 0000000..6f405b2
 +        scene.group_reuse.push(Some(0)); assert!(!scene.valid_reuse(&mailbox));
 +    }
 +}
+diff --git a/src/preview_shader_contract.rs b/src/preview_shader_contract.rs
+new file mode 100644
+index 0000000..1ccca71
+--- /dev/null
++++ b/src/preview_shader_contract.rs
+@@ -0,0 +1,115 @@
++//! Inspect the actual compiled SPIR-V, not just the matching Rust declarations.
++use crate::{camera::InitializePreviewPushConstants, preview_denoise::SurfacePush,
++    shader::{load_shader_bytes, PreviewPushConstants, ShaderName}};
++
++struct Spirv(Vec<(u32, Vec<u32>)>);
++impl Spirv {
++    fn new(words: &[u32]) -> Self {
++        assert_eq!(words[0], 0x07230203);
++        let mut instructions = Vec::new();
++        let mut cursor = 5;
++        while cursor < words.len() {
++            let length = (words[cursor] >> 16) as usize;
++            assert!(length > 0 && cursor + length <= words.len());
++            instructions.push((words[cursor] & 0xffff, words[cursor + 1..cursor + length].to_vec()));
++            cursor += length;
++        }
++        Self(instructions)
++    }
++
++    fn ty(&self, id: u32) -> &(u32, Vec<u32>) {
++        self.0.iter().find(|(op, args)| matches!(op, 21 | 22 | 23 | 28 | 30 | 32) && args[0] == id)
++            .expect("unsupported SPIR-V type in push constants")
++    }
++
++    fn offsets(&self, id: u32) -> Vec<usize> {
++        let (op, members) = self.ty(id);
++        assert_eq!(*op, 30); // OpTypeStruct
++        (0..members.len() - 1).map(|index| {
++            self.0.iter().find(|(op, a)| *op == 72 && a[0] == id && a[1] == index as u32 && a[2] == 35)
++                .expect("missing member Offset decoration").1[3] as usize
++        }).collect()
++    }
++
++    fn bytes(&self, id: u32) -> usize {
++        let (op, a) = self.ty(id);
++        match op {
++            21 | 22 => (a[1] / 8) as usize, // OpTypeInt / OpTypeFloat
++            23 => self.bytes(a[1]) * a[2] as usize, // OpTypeVector
++            32 => { // Device address, not a shader 64-bit integer.
++                assert_eq!(a[1], 5349); // PhysicalStorageBuffer
++                8
++            }
++            28 => {
++                let length = self.0.iter().find(|(op, c)| *op == 43 && c[1] == a[2])
++                    .expect("array length is not an OpConstant").1[2] as usize;
++                let stride = self.0.iter().find(|(op, d)| *op == 71 && d[0] == id && d[1] == 6)
++                    .expect("missing ArrayStride decoration").1[2] as usize;
++                stride * length
++            }
++            30 => a[1..].iter().zip(self.offsets(id)).map(|(member, offset)| offset + self.bytes(*member)).max().unwrap(),
++            _ => unreachable!(),
++        }
++    }
++
++    fn push_type(&self) -> u32 {
++        let variable = self.0.iter().find(|(op, a)| *op == 59 && a[2] == 9)
++            .expect("missing PushConstant variable");
++        let (op, pointer) = self.ty(variable.1[0]);
++        assert_eq!(*op, 32);
++        assert_eq!(pointer[1], 9);
++        pointer[2]
++    }
++
++    fn assert_no_int64(&self) {
++        for (op, a) in &self.0 {
++            if *op == 17 { // OpCapability: Int64 / Int64Atomics
++                assert!(!matches!(a[0], 11 | 12), "shader unexpectedly requires a 64-bit integer feature");
++            }
++            if *op == 21 { assert_ne!(a[1], 64, "shader contains a 64-bit integer type"); }
++        }
++    }
++}
++
++#[test]
++fn preview_compiled_layouts_match_host_and_reserve_upstream_space() {
++    for (name, size, offsets, reserve) in [
++        (ShaderName::InitializePreview, size_of::<InitializePreviewPushConstants>(), vec![0], 48 + 8),
++        (ShaderName::Preview, size_of::<PreviewPushConstants>(), vec![0, 4, 8, 12, 16, 20, 24, 32, 36], 48),
++        (ShaderName::PreviewSurface, size_of::<SurfacePush>(), vec![0, 8, 12], 48),
++    ] {
++        let spv = Spirv::new(&load_shader_bytes(name));
++        assert_eq!(spv.offsets(spv.push_type()), offsets);
++        assert_eq!(spv.bytes(spv.push_type()), size);
++        assert!(size + reserve <= 128, "preview leaves no room for upstream push data");
++    }
++}
++
++#[test]
++fn preview_shaders_do_not_require_int64_and_fit_portable_push_limit() {
++    for name in [ShaderName::InitializePreview, ShaderName::Preview, ShaderName::PreviewSurface,
++        ShaderName::BakeLightProbes, ShaderName::BakeDirectLight, ShaderName::BakeIndirect,
++        ShaderName::BakeDirectEmission, ShaderName::AdjustSamples, ShaderName::ShadowMask] {
++        let spv = Spirv::new(&load_shader_bytes(name));
++        spv.assert_no_int64();
++        assert!(spv.bytes(spv.push_type()) <= 128);
++    }
++}
++
++#[test]
++fn preview_packed_camera_preserves_every_ray_component() {
++    use crate::{math::Vector3, preview_bridge::PreviewView};
++    let vectors: [Vector3; 6] = std::array::from_fn(|i| {
++        let n = i as f32 * 3.;
++        Vector3::new(n + 0.25, -n - 1.5, n + 2.75)
++    });
++    let view = PreviewView { origin: vectors[0], origin_dx: vectors[1], origin_dy: vectors[2],
++        direction: vectors[3], direction_dx: vectors[4], direction_dy: vectors[5],
++        width: 37, height: 19, revision: 1 };
++    let constants = view.constants();
++    let bytes = crate::as_bytes(&constants);
++    assert_eq!(bytes.len(), 72);
++    let floats: Vec<f32> = bytes.chunks_exact(4).map(|v| f32::from_ne_bytes(v.try_into().unwrap())).collect();
++    let expected: Vec<f32> = vectors.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
++    assert_eq!(floats, expected);
++}
 diff --git a/src/preview_updates.rs b/src/preview_updates.rs
 new file mode 100644
 index 0000000..d6648dc
@@ -2800,7 +2954,7 @@ index 0000000..d6648dc
 +}
 +
 diff --git a/src/shader.rs b/src/shader.rs
-index 9c30855..d8626a2 100644
+index 9c30855..91d75f6 100644
 --- a/src/shader.rs
 +++ b/src/shader.rs
 @@ -10,6 +10,7 @@ pub enum ShaderName {
@@ -2819,14 +2973,16 @@ index 9c30855..d8626a2 100644
          ShaderName::BakeDirectLight => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_light.spv")),
          ShaderName::BakeDirectEmission => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_emission.spv")),
          ShaderName::ShadowMask => include_bytes!(concat!(env!("OUT_DIR"), "/bake_shadowmask.spv")),
-@@ -483,4 +485,7 @@ pub struct PreviewPushConstants {
+@@ -483,4 +485,9 @@ pub struct PreviewPushConstants {
      pub width: u32,
      pub height: u32,
      pub bounce_count: u32,
-+    pub lights_address: u64,
++    // Host-side Vulkan address; the shader uses a typed pointer, not uint64_t.
++    pub lights_address: vk::DeviceAddress,
 +    pub indirect_intensity: f32,
 +    pub pad: u32,
  }
++const _: () = assert!(size_of::<PreviewPushConstants>() + 48 <= 128);
 diff --git a/src/texture2d.rs b/src/texture2d.rs
 index a836d3a..ccc2a19 100644
 --- a/src/texture2d.rs
