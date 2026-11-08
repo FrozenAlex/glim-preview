@@ -90,7 +90,7 @@ To check packaging locally after building:
 
 ```powershell
 python -m unittest discover -s Development~ -p test_package_release.py -v
-python Development~/package_release.py --native-dll dist/glim_preview_addon_012_v1.dll --native-so dist/glim_preview_addon_012_v1.so --output dist/package --tag v0.1.2
+python Development~/package_release.py --native-dll dist/glim_preview_addon_012_v1.dll --native-so dist/glim_preview_addon_012_v1.so --output dist/package --tag v0.1.4
 ```
 
 For a new release, change the manifest version and push that commit. Run **Build
