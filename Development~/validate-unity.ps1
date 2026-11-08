@@ -1,7 +1,9 @@
 param(
     [string]$UnityEditor = 'C:\Program Files\Unity\Hub\Editor\2022.3.22f1\Editor\Unity.exe',
     [string]$AddonPackage = '',
-    [string]$UnityProject = ''
+    [string]$UnityProject = '',
+    [ValidateSet('PreviewValidation', 'LightmapperSelectionValidation')]
+    [string]$Validation = 'PreviewValidation'
 )
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -50,7 +52,7 @@ foreach ($name in @('Editor', 'Editor.meta', 'package.json', 'package.json.meta'
     name = 'FrozenAlex.GlimPreview.Editor'; references = @('com.z3y.glim.runtime', 'com.z3y.glim.editor', 'Unity.Postprocessing.Runtime')
     includePlatforms = @('Editor'); allowUnsafeCode = $true
 } | ConvertTo-Json | Set-Content (Join-Path $testAddon 'Editor/FrozenAlex.GlimPreview.Editor.asmdef')
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Tests/PreviewValidation.cs') -Destination (Join-Path $testAddon 'Editor/PreviewValidation.cs')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Tests/$Validation.cs") -Destination (Join-Path $testAddon "Editor/$Validation.cs")
 $manifest = Get-Content (Join-Path $projectRoot 'Packages/manifest.json') -Raw | ConvertFrom-Json
 $dependencies = @{}
 foreach ($property in $manifest.dependencies.PSObject.Properties) {
@@ -59,6 +61,6 @@ foreach ($property in $manifest.dependencies.PSObject.Properties) {
 $dependencies['com.unity.postprocessing'] = 'file:' + $postProcessing.FullName.Replace('\', '/')
 @{ dependencies = $dependencies } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $testRoot 'Packages/manifest.json')
 $logPath = Join-Path $testRoot 'unity.log'
-$arguments = @('-batchmode', '-projectPath', ('"' + $testRoot + '"'), '-executeMethod', 'FrozenAlex.GlimPreview.PreviewValidation.Run', '-logFile', ('"' + $logPath + '"'))
+$arguments = @('-batchmode', '-projectPath', ('"' + $testRoot + '"'), '-executeMethod', "FrozenAlex.GlimPreview.$Validation.Run", '-logFile', ('"' + $logPath + '"'))
 $process = Start-Process -FilePath $UnityEditor -ArgumentList $arguments -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru
 [pscustomobject]@{ PID = $process.Id; Project = $testRoot; Result = (Join-Path $testRoot 'Results/result.txt'); Log = $logPath }

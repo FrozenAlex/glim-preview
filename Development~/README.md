@@ -69,6 +69,16 @@ exits Unity when complete. It covers live albedo and emission, HDR, scene desatu
 False Color, Highlights, denoising, transforms/Undo, restart behavior, and baked UV
 and temporary-renderer preservation. It does not open or save the host scene.
 
+To check Lightmapper selection across Glim's temporary bake-scene replacement:
+
+```powershell
+./Development~/validate-unity.ps1 -Validation LightmapperSelectionValidation
+```
+
+This closes and reopens an isolated source scene three times, verifies the exact
+selected component is restored even with multiple/inactive Lightmappers, rejects
+a competing component in the temporary scene, and preserves explicit clearing.
+
 The package README documents the supported workflow and remaining live-update
 limits. This add-on replaces the earlier in-place Glim 0.11 preview extension.
 

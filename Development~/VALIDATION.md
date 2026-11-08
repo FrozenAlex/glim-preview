@@ -1,4 +1,4 @@
-# Validation Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ 2026-11-08
+# Validation Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р вЂ Р В РІР‚С™Р РЋРЎС™ 2026-11-08
 
 - Glim 0.12.0 plus the independent add-on compiled successfully against the project's Unity references.
 - Native preview unit tests: 15 passed. The embedded GPU test was run separately and also exercises OIDN; the standalone noisy-surface OIDN test was not rerun.
@@ -66,3 +66,18 @@ This change prepares the add-on payloads; it does not port the later upstream re
 - The test retains the Standard shader's neutral specular contribution when checking
   color dominance. Shader property metadata is cached; GPU readback remains limited
   to one atlas in flight at the existing 0.35-second polling interval.
+
+
+## Lightmapper field after baking (2026-11-09)
+
+- Upstream `LightingData.CreateAsset` closes the source scene, bakes a temporary
+  scene, then reopens the source. The old window-held component reference is destroyed.
+- The window remembers the chosen component's GlobalObjectId before scene closure
+  and restores that exact component after reopening, with a throttled retry if
+  scene-open notification precedes object availability. Temporary-scene objects
+  cannot replace the remembered selection; an explicitly cleared field stays clear.
+- The isolated Unity 2022.3 selection regression passed three repeated bake-style
+  scene replacements, including multiple Lightmappers, an inactive chosen component,
+  selection before the first scene save, and a competing temporary-scene component.
+- This test exercises the scene replacement lifecycle without running a lighting bake.
+  No native library changes or rebuild were required.

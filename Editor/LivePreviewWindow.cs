@@ -1,6 +1,7 @@
 using System;
 using Glim;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -9,6 +10,9 @@ namespace FrozenAlex.GlimPreview
     public sealed class LivePreviewWindow : EditorWindow
     {
         [SerializeField] GlimLightmapper lightmapper;
+        [SerializeField] string lightmapperId;
+        [SerializeField] bool selectionCleared;
+        double nextRestore;
         string error;
 
         [MenuItem("Tools/Glim/Live Preview")]
@@ -18,32 +22,97 @@ namespace FrozenAlex.GlimPreview
         static void OpenForComponent(MenuCommand command)
         {
             var window = GetWindow<LivePreviewWindow>("Glim Live Preview");
-            window.lightmapper = command.context as GlimLightmapper;
+            window.SetLightmapper(command.context as GlimLightmapper);
         }
 
         void OnEnable()
         {
             minSize = new Vector2(340, 320);
-            FindLightmapper();
+            EditorSceneManager.sceneClosing += OnSceneClosing;
+            EditorSceneManager.sceneOpened += OnSceneOpened;
+            RememberLightmapper();
+            RestoreLightmapper();
         }
 
-        void FindLightmapper()
+        void OnDisable()
         {
-            if (lightmapper) return;
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects()) {
-                lightmapper = root.GetComponentInChildren<GlimLightmapper>();
-                if (lightmapper) break;
+            EditorSceneManager.sceneClosing -= OnSceneClosing;
+            EditorSceneManager.sceneOpened -= OnSceneOpened;
+        }
+
+        internal void SetLightmapper(GlimLightmapper value)
+        {
+            lightmapper = value;
+            selectionCleared = !value;
+            lightmapperId = null;
+            RememberLightmapper();
+            error = null;
+        }
+
+        void RememberLightmapper()
+        {
+            if (lightmapper && !EditorApplication.isPlayingOrWillChangePlaymode && !string.IsNullOrEmpty(lightmapper.gameObject.scene.path))
+                lightmapperId = GlobalObjectId.GetGlobalObjectIdSlow(lightmapper).ToString();
+        }
+
+        void OnSceneClosing(Scene scene, bool removingScene)
+        {
+            // Glim closes the source scene while creating its lighting data, then
+            // reopens it. Save the persistent ID before that destroys this instance.
+            if (lightmapper && lightmapper.gameObject.scene == scene) RememberLightmapper();
+        }
+
+        void OnSceneOpened(Scene scene, OpenSceneMode mode)
+        {
+            RestoreLightmapper();
+            Repaint();
+        }
+
+        void RestoreLightmapper()
+        {
+            if (lightmapper || selectionCleared || EditorApplication.isPlayingOrWillChangePlaymode) return;
+            if (!string.IsNullOrEmpty(lightmapperId))
+            {
+                if (GlobalObjectId.TryParse(lightmapperId, out var id))
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(id.assetGUID.ToString());
+                    if (SceneManager.GetSceneByPath(path).isLoaded)
+                        lightmapper = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(id) as GlimLightmapper;
+                }
+                // Never substitute a different component from the temporary bake
+                // scene, or the first component in a scene with several lightmappers.
+                return;
+            }
+            var activeScene = SceneManager.GetActiveScene();
+            if (!activeScene.IsValid() || !activeScene.isLoaded) return;
+            foreach (var root in activeScene.GetRootGameObjects()) {
+                var candidate = root.GetComponentInChildren<GlimLightmapper>();
+                if (candidate) { SetLightmapper(candidate); break; }
             }
         }
 
-        void OnInspectorUpdate() => Repaint();
+        void OnInspectorUpdate()
+        {
+            // Scene-open callbacks may precede object restoration. Retry only a
+            // missing reference; ordinary repaint/selection changes leave it alone.
+            if (!lightmapper && EditorApplication.timeSinceStartup >= nextRestore)
+            {
+                nextRestore = EditorApplication.timeSinceStartup + 0.5;
+                RestoreLightmapper();
+            }
+            Repaint();
+        }
 
         void OnGUI()
         {
             EditorGUILayout.LabelField("Glim Live Preview", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox("Preview directly in Scene View with the scene's color correction. Uses the selected Glim Lightmapper's preview settings.", MessageType.Info);
             using (new EditorGUI.DisabledScope(Bake.IsPreviewRunning))
-                lightmapper = (GlimLightmapper)EditorGUILayout.ObjectField("Lightmapper", lightmapper, typeof(GlimLightmapper), true);
+            {
+                EditorGUI.BeginChangeCheck();
+                var selected = (GlimLightmapper)EditorGUILayout.ObjectField("Lightmapper", lightmapper, typeof(GlimLightmapper), true);
+                if (EditorGUI.EndChangeCheck()) SetLightmapper(selected);
+            }
 
             EditorGUI.BeginChangeCheck();
             PreviewViewport.UseSceneEffects = EditorGUILayout.Toggle("Scene color correction / effects", PreviewViewport.UseSceneEffects);
