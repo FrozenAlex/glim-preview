@@ -1,0 +1,2936 @@
+diff --git a/build.rs b/build.rs
+index b8712ff..35af251 100644
+--- a/build.rs
++++ b/build.rs
+@@ -14,6 +14,7 @@ fn main() {
+     println!("cargo:rerun-if-changed=shaders");
+ 
+     let mut shaders = Vec::new();
++    shaders.push(Shader { src: "preview_surface.slang".into(), dst: "preview_surface.spv".into() });
+ 
+     shaders.push(Shader {
+         src: "initialize_preview.slang".into(),
+@@ -86,3 +87,4 @@ fn main() {
+         println!("spv_path: {:?}", spv_path);
+     }
+ }
++
+diff --git a/shaders/initialize_preview.slang b/shaders/initialize_preview.slang
+index a9dacc4..b520452 100644
+--- a/shaders/initialize_preview.slang
++++ b/shaders/initialize_preview.slang
+@@ -7,11 +7,12 @@ PushConstants Push;
+ 
+ struct PushConstants
+ {
+-    float3 cameraPosition;
+-    float fov;
+-
+-    float3 cameraDirection;
+-    float pad0;
++    float3 origin; float originPad;
++    float3 originDx; float originDxPad;
++    float3 originDy; float originDyPad;
++    float3 direction; float directionPad;
++    float3 directionDx; float directionDxPad;
++    float3 directionDy; float directionDyPad;
+ }
+ 
+ [shader("compute")]
+@@ -28,22 +29,10 @@ void main(uint3 threadID: SV_DispatchThreadID)
+         return;
+     }
+ 
+-    float2 ndc = (float2(coords) + 0.5) / float2(resolution);
+-    ndc = ndc * 2.0 - 1.0;
+-    ndc.y = -ndc.y;
+-
+-    float aspect = float(resolution.x) / float(resolution.y);
+-    ndc.x *= aspect * Push.fov;
+-    ndc.y *= Push.fov;
+-
+-    float3 worldUp = float3(0.0, 1.0, 0.0);
+-    float3 camForward = Push.cameraDirection;
+-    float3 camRight = normalize(cross(camForward, worldUp));
+-    float3 camUp = cross(camRight, camForward);
+-
++    float2 uv = (float2(coords) + 0.5) / float2(resolution);
+     Ray ray;
+-    ray.P = Push.cameraPosition;
+-    ray.D = normalize(camForward + ndc.x * camRight + ndc.y * camUp);
++    ray.P = Push.origin + uv.x * Push.originDx + uv.y * Push.originDy;
++    ray.D = normalize(Push.direction + uv.x * Push.directionDx + uv.y * Push.directionDy);
+     ray.tMin = 0.001;
+     ray.tMax = RAY_MAX;
+ 
+diff --git a/shaders/preview.slang b/shaders/preview.slang
+index 8b042a4..d2f9677 100644
+--- a/shaders/preview.slang
++++ b/shaders/preview.slang
+@@ -13,6 +13,9 @@ struct PushConstants
+     uint width;
+     uint height;
+     uint bounceCount;
++    uint64_t lightsAddress;
++    float indirectIntensity;
++    uint pad;
+ };
+ 
+ [shader("compute")]
+@@ -27,6 +30,10 @@ void main(uint3 threadID: SV_DispatchThreadID)
+         return;
+     }
+ 
++    float4 color = 0.0;
++    float3 indirectColor = 0.0;
++    float3 throughput = float3(1.0);
++
+     float4 visibility = VisibilityBuffer[coords];
+     uint primitiveID = asuint(visibility.z);
+     if (primitiveID == uint::maxValue)
+@@ -44,14 +51,9 @@ void main(uint3 threadID: SV_DispatchThreadID)
+     uint3 indexing = BlueNoiseIndexing(pixelSeed, sampleIndex, ~0u, sampleCount, SamplingPattern::BlueNoiseFirst);
+     uint dimension = 0;
+ 
+-    float4 color = 0.0;
+-    float3 throughput = float3(1.0);
+-
+     float3 emission = SampleEmission(surface.coords, surface.lightmapGroup).rgb;
+-    if (!surface.emissive)
+-    {
+-        emission = 0.0;
+-    }
++    // The current emission atlas is authoritative; cached mesh flags describe
++    // only the material at export time and would prevent enabling emission live.
+     float3 albedo = SampleAlbedo(surface.coords, surface.lightmapGroup).rgb;
+     color.rgb += emission;
+     throughput = albedo;
+@@ -66,9 +68,13 @@ void main(uint3 threadID: SV_DispatchThreadID)
+         for (uint lightIndex = 0; lightIndex < Push.lightCount; lightIndex++)
+         {
+             float3 L;
+-            float3 current = ShadeLightDirect(Lights[lightIndex], positionWS, normalWS, xiLight, throughput, L, false);
+-            float NoL = saturate(dot(L, normalWS));
+-            color.rgb += current * NoL;
++            float3 current = ShadeLightDirect(((Light*)Push.lightsAddress)[lightIndex], positionWS, normalWS, xiLight, throughput, L, false);
++            float3 NoL = saturate(dot(L, normalWS));
++            // The first surface receives direct light; later surfaces contribute GI.
++            if (bounceIndex == 0)
++                color.rgb += current * NoL;
++            else
++                indirectColor += current * NoL;
+         }
+ 
+         float2 xiBounce = SobolBurleySample2D(indexing.x, dimension++, indexing.y, indexing.z);
+@@ -95,21 +101,32 @@ void main(uint3 threadID: SV_DispatchThreadID)
+             }
+ 
+             float3 bounceAlbedo = SampleAlbedo(surface.coords, surface.lightmapGroup).rgb;
+-            if (surface.emissive)
++
+             {
+                 float3 bounceEmission = SampleEmission(surface.coords, surface.lightmapGroup).rgb;
+-                color.rgb += bounceEmission * throughput;
++                // Emission directly visible from the first surface belongs to
++                // Glim's direct-emission pass, just like directly received sky light.
++                if (bounceIndex == 0)
++                    color.rgb += bounceEmission * throughput;
++                else
++                    indirectColor += bounceEmission * throughput;
+             }
+ 
+             throughput *= bounceAlbedo;
+         }
+         else
+         {
+-            color.rgb += throughput * SampleSkybox(ray.D);
++            if (bounceIndex == 0)
++                color.rgb += throughput * SampleSkybox(ray.D);
++            else
++                indirectColor += throughput * SampleSkybox(ray.D);
+             break;
+         }
+     }
+ 
++    // Scale GI once, rather than multiplying throughput on every bounce.
++    color.rgb += indirectColor * Push.indirectIntensity;
++
+     float4 previous = LightmapDiffuse[coords];
+     AccumulateColor(previous, sampleIndex, color);
+     previous.a = 1.0;
+diff --git a/shaders/preview_surface.slang b/shaders/preview_surface.slang
+new file mode 100644
+index 0000000..66fb3ea
+--- /dev/null
++++ b/shaders/preview_surface.slang
+@@ -0,0 +1,38 @@
++#include "includes/core.slang"
++
++struct SurfaceSample
++{
++    float4 lighting;
++    float4 albedo;
++    float4 normal;
++    float4 emission;
++};
++struct PushConstants { uint64_t outputAddress; uint width; uint height; }
++[[vk::push_constant]] PushConstants Push;
++
++[shader("compute")]
++[numthreads(8, 8, 1)]
++void main(uint3 threadID: SV_DispatchThreadID)
++{
++    uint2 coords = threadID.xy;
++    if (coords.x >= Push.width || coords.y >= Push.height) return;
++    float4 raw = LightmapDiffuse[coords];
++    float4 visibility = VisibilityBuffer[coords];
++    uint primitiveID = asuint(visibility.z);
++    SurfaceSample result;
++    result.lighting = 0;
++    result.albedo = 0;
++    result.normal = 0;
++    result.emission = raw; // Sky/background passes through without denoising.
++    if (primitiveID != uint::maxValue)
++    {
++        Surface surface = Surface::Get(asuint(visibility.z), visibility.xy);
++        result.albedo = float4(SampleAlbedo(surface.coords, surface.lightmapGroup).rgb, 1);
++        result.normal = float4(surface.N, 1);
++        result.emission = float4(SampleEmission(surface.coords, surface.lightmapGroup).rgb, raw.a);
++        // Primary albedo is multiplicative in the diffuse path tracer. Separate
++        // it and primary emission so neither is smoothed by the neural filter.
++        result.lighting.rgb = max(raw.rgb - result.emission.rgb, 0) / max(result.albedo.rgb, 1e-6);
++    }
++    ((SurfaceSample*)Push.outputAddress)[coords.y * Push.width + coords.x] = result;
++}
+diff --git a/src/bindings.rs b/src/bindings.rs
+index 64c1702..e8450d2 100644
+--- a/src/bindings.rs
++++ b/src/bindings.rs
+@@ -227,16 +227,34 @@ pub extern "C" fn app_request_cancel() {
+ 
+ #[unsafe(no_mangle)]
+ pub extern "C" fn app_new(config: GlimConfig, output_dir: FfiString) -> *mut Glim {
++    new_app(config, output_dir, false)
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn app_new_embedded_preview(config: GlimConfig, output_dir: FfiString) -> *mut Glim {
++    if !config.is_preview { return null_mut(); }
++    new_app(config, output_dir, true)
++}
++
++fn new_app(config: GlimConfig, output_dir: FfiString, embedded: bool) -> *mut Glim {
+     CANCEL_REQUESTED.store(false, Ordering::Relaxed);
++    crate::preview_updates::reset(config.is_preview);
++    crate::preview_geometry::reset(config.is_preview);
++    crate::preview_scene::reset(config.is_preview);
++    crate::preview_bridge::reset(config.is_preview, embedded);
+     let result = catch_unwind(AssertUnwindSafe(|| {
+         let output_dir = PathBuf::from(output_dir.to_string());
+-        let app = Glim::new(config.clone(), output_dir);
++        let app = Glim::new_with_preview_mode(config.clone(), output_dir, embedded);
+         Box::into_raw(Box::new(app))
+     }));
+ 
+     match result {
+         Ok(val) => val,
+         Err(err) => {
++            crate::preview_updates::reset(false);
++            crate::preview_geometry::reset(false);
++            crate::preview_scene::reset(false);
++            crate::preview_bridge::reset(false, false);
+             handle_unwind_error(config.log_callback, err);
+             null_mut() as *mut Glim
+         }
+@@ -260,7 +278,8 @@ pub extern "C" fn app_add_mesh(app: *mut Glim, mesh: FfiMesh) {
+         }
+ 
+         let target_mesh = &mut app.meshes[index];
+-
++        let vertex_start = target_mesh.vertices.len();
++        let index_start = target_mesh.indices.len();
+         let emissive = mesh.emissive;
+ 
+         let mut fix_seams = mesh.fix_seams;
+@@ -277,6 +296,15 @@ pub extern "C" fn app_add_mesh(app: *mut Glim, mesh: FfiMesh) {
+             fix_seams,
+             emissive,
+         );
++        if app.config.is_preview {
++            app.preview_meshes.push(crate::preview_geometry::MeshChunk {
++                bucket: index, vertex_start, index_start,
++                index_count: target_mesh.indices.len() - index_start,
++                original_vertices: target_mesh.vertices[vertex_start..].to_vec(),
++                flipped: false,
++            });
++            crate::preview_geometry::set_mesh_count(app.preview_meshes.len());
++        }
+     }));
+ 
+     if let Err(err) = result {
+@@ -293,13 +321,9 @@ pub extern "C" fn app_add_light(app: *mut Glim, mut light: Light) {
+     let app = unsafe { &mut *app };
+ 
+     let result = catch_unwind(AssertUnwindSafe(|| {
+-        let system = app.config.coordinate_system;
+-        light.position.transform_space(system);
+-        light.direction.transform_space(system);
+-        light.up.transform_space(system);
+-
+-        light.direction = Vector3::ZERO - light.direction; // ??
++        light.convert_coordinate_system(app.config.coordinate_system);
+         light.shadow_radius_or_angle = light.shadow_radius_or_angle.max(0.0);
++
+         app.cpu_lights.push(light);
+     }));
+ 
+@@ -399,6 +423,10 @@ pub extern "C" fn app_run(app: *mut Glim) {
+     let result = catch_unwind(AssertUnwindSafe(|| {
+         initialize_render(app);
+     }));
++    crate::preview_updates::reset(false);
++    crate::preview_geometry::reset(false);
++    crate::preview_scene::reset(false);
++    crate::preview_bridge::reset(false, false);
+ 
+     if let Err(err) = result {
+         handle_unwind_error(app.config.log_callback, err);
+@@ -481,6 +509,10 @@ pub extern "C" fn app_destroy(app: *mut Glim) {
+     let app = unsafe { &mut *app };
+ 
+     let callback = app.config.log_callback;
++    crate::preview_updates::reset(false);
++    crate::preview_geometry::reset(false);
++    crate::preview_scene::reset(false);
++    crate::preview_bridge::reset(false, false);
+ 
+     let result = catch_unwind(AssertUnwindSafe(|| {
+         // Take ownership back from the pointer and let Box drop it
+diff --git a/src/camera.rs b/src/camera.rs
+index c3f6374..418547d 100644
+--- a/src/camera.rs
++++ b/src/camera.rs
+@@ -10,29 +10,36 @@ pub struct Camera {
+ }
+ 
+ #[repr(C)]
++#[derive(Clone, Copy)]
+ pub struct InitializePreviewPushConstants {
+-    pub camera_position: Vector3,
+-    pub fov_half_tan: f32,
+-
+-    pub camera_direction: Vector3,
+-    pub pad: u32,
++    pub origin: Vector3,
++    pub origin_pad: f32,
++    pub origin_dx: Vector3,
++    pub origin_dx_pad: f32,
++    pub origin_dy: Vector3,
++    pub origin_dy_pad: f32,
++    pub direction: Vector3,
++    pub direction_pad: f32,
++    pub direction_dx: Vector3,
++    pub direction_dx_pad: f32,
++    pub direction_dy: Vector3,
++    pub direction_dy_pad: f32,
+ }
+ 
+ impl Camera {
+-    pub fn make_push_constants(&self) -> InitializePreviewPushConstants {
+-        let x = self.yaw.sin() * self.pitch.cos();
+-        let y = self.pitch.sin();
+-        let z = self.yaw.cos() * self.pitch.cos();
+-
+-        let camera_direction = Vector3::new(x, y, z).normalize();
+-
+-        let fov_half_tan = (self.fov.to_radians() * 0.5).tan();
+-
++    pub fn make_push_constants(&self, aspect: f32) -> InitializePreviewPushConstants {
++        let forward = self.get_forward().normalize();
++        let right = forward.cross(Vector3::UP).normalize();
++        let up = right.cross(forward);
++        let tangent = (self.fov.to_radians() * 0.5).tan();
+         InitializePreviewPushConstants {
+-            camera_position: self.position,
+-            fov_half_tan,
+-            camera_direction,
+-            pad: 0,
++            origin: self.position, origin_pad: 0.0,
++            origin_dx: Vector3::ZERO, origin_dx_pad: 0.0,
++            origin_dy: Vector3::ZERO, origin_dy_pad: 0.0,
++            direction: forward - right * (aspect * tangent) + up * tangent,
++            direction_pad: 0.0,
++            direction_dx: right * (2.0 * aspect * tangent), direction_dx_pad: 0.0,
++            direction_dy: up * (-2.0 * tangent), direction_dy_pad: 0.0,
+         }
+     }
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 8aeb13a..d9763d6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,5 +1,12 @@
+ #![allow(unsafe_op_in_unsafe_fn)]
+ 
++mod preview_updates;
++mod preview_bridge;
++mod preview_denoise;
++mod preview_geometry;
++mod preview_scene;
++mod preview_embedded;
++
+ use ash::vk::{self, Handle};
+ use std::io::{self, Write};
+ use std::mem;
+@@ -85,6 +92,10 @@ pub struct Glim {
+     pub config: GlimConfig,
+     pub vk: VulkanContext,
+     pub window: *mut GLFWwindow,
++    pub embedded_preview: bool,
++    pub preview_meshes: Vec<preview_geometry::MeshChunk>,
++    pub preview_reuse_groups: Vec<Option<usize>>,
++    pub external_view: Option<preview_bridge::PreviewView>,
+ 
+     pub meshes: [Mesh; GEOMETRIES_VARIANTS],
+ 
+@@ -106,6 +117,7 @@ pub struct Glim {
+     pub camera: Camera,
+ 
+     pub preview_shader: ComputeShader,
++    pub preview_surface_shader: ComputeShader,
+     pub init_from_camera_shader: ComputeShader,
+     pub preview_initialized: bool,
+ 
+@@ -151,6 +163,9 @@ impl Drop for Glim {
+         if !self.preview_shader.pipeline.is_null() {
+             self.preview_shader.destroy(&self.vk);
+         }
++        if !self.preview_surface_shader.pipeline.is_null() {
++            self.preview_surface_shader.destroy(&self.vk);
++        }
+         self.gpu_mesh.destroy(&self.vk);
+ 
+         if !self.bvh_nodes.buffer.is_null() {
+@@ -232,7 +247,8 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
+     let vk = &mut app.vk;
+     let shader = &app.init_from_camera_shader;
+ 
+-    let push = app.camera.make_push_constants();
++    let push = app.external_view.map(|v| v.constants()).unwrap_or_else(||
++        app.camera.make_push_constants(width as f32 / height as f32));
+ 
+     let constants_bytes = as_bytes(&push);
+ 
+@@ -299,11 +315,17 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
+         vk.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
+     }
+ 
++    // Visibility writes are consumed by the path tracer in the same submission.
++    let barrier = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::SHADER_WRITE)
++        .dst_access_mask(vk::AccessFlags::SHADER_READ);
++    unsafe { vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::COMPUTE_SHADER,
++        vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[barrier], &[], &[]); }
+     app.preview_initialized = true;
+ }
+ 
+ // main render function
+-fn initialize_render(app: &mut Glim) {
++fn prepare_scene(app: &mut Glim) {
++    if app.config.is_preview { preview_scene::ensure_nonempty(app); }
+     for mesh in &app.meshes {
+         let message = format!(
+             "Geometries Group Transparent: {}, Cast Shadows: {}, Vertices: {} Triangles: {}",
+@@ -326,16 +348,19 @@ fn initialize_render(app: &mut Glim) {
+ 
+     // upload lights
+     if app.cpu_lights.len() > 0 {
+-        // first other lights, then area, then mixed
+-        app.cpu_lights.sort_unstable_by_key(|x| {
+-            if x.ty == LightType::Area || x.ty == LightType::Disc {
+-                1u8
+-            } else if x.mixed {
+-                2u8
+-            } else {
+-                0u8
+-            }
+-        });
++        // Preview updates use the original Unity export order. Only the bake
++        // passes require area and mixed lights to be partitioned.
++        if !app.config.is_preview {
++            app.cpu_lights.sort_unstable_by_key(|x| {
++                if x.ty == LightType::Area || x.ty == LightType::Disc {
++                    1u8
++                } else if x.mixed {
++                    2u8
++                } else {
++                    0u8
++                }
++            });
++        }
+ 
+         app.gpu_lights = Buffer::new(
+             &app.vk,
+@@ -421,8 +446,16 @@ fn initialize_render(app: &mut Glim) {
+         emissions.push(desc);
+     }
+ 
+-    let mut albedo_array = TextureArray::new(&app.vk, albedos);
+-    let mut emission_array = TextureArray::new(&app.vk, emissions);
++    if app.config.is_preview {
++        preview_bridge::register_emissions(app.groups.iter().map(|g|
++            g.settings.width as usize * g.settings.height as usize * 4).collect());
++    }
++    let mut albedo_array = if app.config.is_preview {
++        TextureArray::new_reusing(&app.vk, albedos, &app.preview_reuse_groups, &mut app.albedo_array)
++    } else { TextureArray::new(&app.vk, albedos) };
++    let mut emission_array = if app.config.is_preview {
++        TextureArray::new_reusing(&app.vk, emissions, &app.preview_reuse_groups, &mut app.emission_array)
++    } else { TextureArray::new(&app.vk, emissions) };
+ 
+     const STAGING_RESOLUTION: u64 = 1024;
+     let mut staging_buffer = Buffer::empty(
+@@ -439,8 +472,10 @@ fn initialize_render(app: &mut Glim) {
+     for index in 0..app.groups.len() {
+         let group = &app.groups[index];
+ 
+-        albedo_array.textures[index].set_pixels(&app.vk, &group.albedo_pixels, &staging_buffer);
+-        emission_array.textures[index].set_pixels(&app.vk, &group.emission_pixels, &staging_buffer);
++        if !matches!(app.preview_reuse_groups.get(index), Some(Some(_))) {
++            albedo_array.textures[index].set_pixels(&app.vk, &group.albedo_pixels, &staging_buffer);
++            emission_array.textures[index].set_pixels(&app.vk, &group.emission_pixels, &staging_buffer);
++        }
+     }
+ 
+     // free
+@@ -452,6 +487,7 @@ fn initialize_render(app: &mut Glim) {
+ 
+     app.albedo_array = albedo_array;
+     app.emission_array = emission_array;
++    app.preview_reuse_groups.clear();
+ 
+     if app.light_cookies.len() == 0 {
+         let dummy_cookie = TexturePixelsData {
+@@ -560,8 +596,14 @@ fn initialize_render(app: &mut Glim) {
+         jitter_barycentrics: app.config.antialiasing as u32,
+     };
+ 
++}
++
++fn initialize_render(app: &mut Glim) {
++    prepare_scene(app);
++    if app.config.is_preview { preview_scene::mark_initial_ready(app); }
+     if app.config.is_preview {
+-        render_preview(app);
++        if app.embedded_preview { preview_embedded::render(app); }
++        else { render_preview(app); }
+     } else {
+         render_lightmaps(app)
+     }
+@@ -589,6 +631,88 @@ fn format_window_title(
+     );
+ }
+ 
++fn apply_preview_updates(app: &mut Glim) {
++    preview_geometry::apply_updates(app);
++    unsafe {
++            if let Some(multiplier) = preview_updates::take_indirect() {
++                if multiplier != app.config.indirect_intensity {
++                    app.config.indirect_intensity = multiplier;
++                    app.preview_push_constants.indirect_intensity = multiplier;
++                    app.preview_initialized = false;
++                }
++            }
++
++            if let Some(states) = preview_updates::take() {
++                if preview_updates::apply(&mut app.cpu_lights, &states, app.config.coordinate_system, app.cookie_array.textures.len()) {
++                    // Finish all in-flight reads before changing the light buffer.
++                    app.vk.device.device_wait_idle().unwrap();
++                    let required = app.cpu_lights.len().max(1) * size_of::<Light>();
++                    if required as u64 > app.gpu_lights.bytes {
++                        app.gpu_lights.destroy(&app.vk);
++                        app.gpu_lights = Buffer::empty(
++                            &app.vk, String::from("Preview lights"),
++                            (app.cpu_lights.len().next_power_of_two() * size_of::<Light>()) as u64,
++                            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
++                            vk::MemoryPropertyFlags::DEVICE_LOCAL,
++                        );
++                    }
++                    app.preview_push_constants.lights_address = app.gpu_lights.gpu_address;
++                    app.preview_push_constants.lights_count = app.cpu_lights.len() as u32;
++                    if !app.cpu_lights.is_empty() {
++                        let bytes = std::slice::from_raw_parts(
++                            app.cpu_lights.as_ptr().cast::<u8>(),
++                            app.cpu_lights.len() * size_of::<Light>(),
++                        );
++                        app.vk.upload_buffer(bytes, app.gpu_lights.buffer);
++                        let cmd = app.vk.begin_single_use_cmd();
++                        let barrier = vk::BufferMemoryBarrier::default()
++                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
++                            .dst_access_mask(vk::AccessFlags::SHADER_READ)
++                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
++                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
++                            .buffer(app.gpu_lights.buffer)
++                            .size(vk::WHOLE_SIZE);
++                        app.vk.device.cmd_pipeline_barrier(
++                            cmd,
++                            vk::PipelineStageFlags::TRANSFER,
++                            vk::PipelineStageFlags::COMPUTE_SHADER,
++                            vk::DependencyFlags::empty(),
++                            &[], &[barrier], &[],
++                        );
++                        app.vk.end_single_use_cmd(cmd);
++                    }
++                    app.preview_initialized = false;
++                }
++            }
++
++    }
++    let emissions = preview_bridge::take_emissions();
++    if !emissions.is_empty() {
++        unsafe { app.vk.device.device_wait_idle().unwrap(); }
++        let mut staging = Buffer::empty(&app.vk, "Preview emission upload".into(), 16 * 1024 * 1024,
++            vk::BufferUsageFlags::TRANSFER_SRC,
++            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
++        for (group, pixels) in emissions {
++            if let Some(texture) = app.emission_array.textures.get_mut(group as usize) {
++                if pixels.len() == texture.width() as usize * texture.height() as usize * 4 {
++                    texture.set_pixels(&app.vk, &pixels, &staging);
++                    app.preview_initialized = false;
++                }
++            }
++        }
++        // set_pixels' upload is now visible to compute shader sampling.
++        let cmd = app.vk.begin_single_use_cmd();
++        let barrier = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
++            .dst_access_mask(vk::AccessFlags::SHADER_READ);
++        unsafe { app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER,
++            vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[barrier], &[], &[]); }
++        app.vk.end_single_use_cmd(cmd);
++        staging.destroy(&app.vk);
++    }
++    // Flush updates for the old IDs before transferring their cached resources.
++    preview_scene::apply_updates(app);
++}
++
+ fn render_preview(app: &mut Glim) {
+     let window = app.window;
+ 
+@@ -630,7 +754,7 @@ fn render_preview(app: &mut Glim) {
+     let mut bake_complete_printed = false;
+ 
+     unsafe {
+-        while glfwWindowShouldClose(window) == 0 {
++        while glfwWindowShouldClose(window) == 0 && !bindings::is_cancelled() {
+             glfwPollEvents();
+ 
+             Log::progress(
+@@ -669,6 +793,8 @@ fn render_preview(app: &mut Glim) {
+ 
+             update_camera(app, delta_time);
+ 
++            apply_preview_updates(app);
++
+             if !app.preview_initialized {
+                 app.preview_push_constants.sample_index = 0;
+                 bake_start_time = std::time::Instant::now();
+@@ -726,72 +852,17 @@ fn render_preview(app: &mut Glim) {
+     }
+ 
+     unsafe {
++        app.vk.device.device_wait_idle().unwrap();
+         glfwPollEvents();
+         glfw_sys::glfwDestroyWindow(window);
+         // glfw_sys::glfwTerminate();
+     };
+ }
+ 
+-fn render_sample_camera(app: &mut Glim) -> bool {
+-    let frame_index = app.vk.swapchain.frame_index;
+-
+-    let frame = &app.vk.swapchain.frames[frame_index];
+-
++fn record_preview_sample(app: &mut Glim, cmd: vk::CommandBuffer) {
+     let width = app.config.preview_settings.width;
+     let height = app.config.preview_settings.height;
+-
+-    let vk = &app.vk.device;
+-
+     unsafe {
+-        vk.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
+-        vk.reset_fences(&[frame.fence]).unwrap()
+-    }
+-
+-    let (image_index, _is_optimal) = match unsafe {
+-        app.vk.swapchain_device.acquire_next_image(
+-            app.vk.swapchain.swapchain,
+-            u64::MAX,
+-            frame.image_available_semaphore,
+-            vk::Fence::null(),
+-        )
+-    } {
+-        Ok(result) => result,
+-        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+-            unsafe {
+-                vk.device_wait_idle().unwrap();
+-            }
+-            app.vk.create_swapchain(width, height);
+-            return false;
+-        }
+-        Err(e) => panic!("acquire failed: {e}"),
+-    };
+-
+-    // assert!(is_optimal);
+-
+-    // todo: handle is_optimal
+-    let fence = frame.fence;
+-    let cmd = frame.command_buffer;
+-    let image_available_semaphore = frame.image_available_semaphore;
+-
+-    let begin_info = vk::CommandBufferBeginInfo {
+-        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+-        ..Default::default()
+-    };
+-
+-    let subresource_range = vk::ImageSubresourceRange {
+-        aspect_mask: vk::ImageAspectFlags::COLOR,
+-        base_mip_level: 0,
+-        level_count: 1,
+-        base_array_layer: 0,
+-        layer_count: 1,
+-    };
+-
+-    unsafe {
+-        vk.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+-            .unwrap();
+-
+-        vk.begin_command_buffer(cmd, &begin_info).unwrap();
+-
+         if app.preview_push_constants.sample_index == 0 {
+             update_visibility_from_camera(app, cmd);
+             app.preview_initialized = true;
+@@ -822,20 +893,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+ 
+         let diffuse = &mut app.render_target.diffuse;
+ 
+-        let barrier = diffuse.barrier(
+-            vk::ImageLayout::GENERAL,
+-            vk::AccessFlags::default(),
+-            vk::AccessFlags::SHADER_WRITE,
+-        );
+-        vk.cmd_pipeline_barrier(
+-            cmd,
+-            vk::PipelineStageFlags::TOP_OF_PIPE,
+-            vk::PipelineStageFlags::COMPUTE_SHADER,
+-            vk::DependencyFlags::empty(),
+-            &[],
+-            &[],
+-            &[barrier],
+-        );
++        let source = vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
++        let destination = vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE;
++        if diffuse.layout() == vk::ImageLayout::GENERAL {
++            let barrier = vk::MemoryBarrier::default().src_access_mask(source).dst_access_mask(destination);
++            vk.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
++                vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
++        } else {
++            let barrier = diffuse.barrier(vk::ImageLayout::GENERAL, source, destination);
++            vk.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
++                vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
++        }
+ 
+         if app.preview_push_constants.sample_index < app.preview_push_constants.max_samples {
+             let shader = &app.preview_shader;
+@@ -869,6 +937,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+             app.preview_push_constants.sample_index += 1;
+         }
+ 
++    }
++}
++
++fn render_sample_camera(app: &mut Glim) -> bool {
++    let frame_index = app.vk.swapchain.frame_index;
++
++    let frame = &app.vk.swapchain.frames[frame_index];
++
++    let width = app.config.preview_settings.width;
++    let height = app.config.preview_settings.height;
++
++    let vk = &app.vk.device;
++
++    unsafe {
++        vk.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
++        vk.reset_fences(&[frame.fence]).unwrap()
++    }
++
++    let (image_index, _is_optimal) = match unsafe {
++        app.vk.swapchain_device.acquire_next_image(
++            app.vk.swapchain.swapchain,
++            u64::MAX,
++            frame.image_available_semaphore,
++            vk::Fence::null(),
++        )
++    } {
++        Ok(result) => result,
++        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
++            unsafe {
++                vk.device_wait_idle().unwrap();
++            }
++            app.vk.create_swapchain(width, height);
++            return false;
++        }
++        Err(e) => panic!("acquire failed: {e}"),
++    };
++
++    // assert!(is_optimal);
++
++    // todo: handle is_optimal
++    let fence = frame.fence;
++    let cmd = frame.command_buffer;
++    let image_available_semaphore = frame.image_available_semaphore;
++
++    let begin_info = vk::CommandBufferBeginInfo {
++        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
++        ..Default::default()
++    };
++
++    let subresource_range = vk::ImageSubresourceRange {
++        aspect_mask: vk::ImageAspectFlags::COLOR,
++        base_mip_level: 0,
++        level_count: 1,
++        base_array_layer: 0,
++        layer_count: 1,
++    };
++
++    unsafe {
++        vk.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
++            .unwrap();
++
++        vk.begin_command_buffer(cmd, &begin_info).unwrap();
++
++        record_preview_sample(app, cmd);
++        let diffuse = &mut app.render_target.diffuse;
++
+         let swapchain_image = &app.vk.swapchain.frames[image_index as usize];
+ 
+         let vk = &app.vk.device;
+@@ -1087,6 +1221,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
+         let max_samples = app.config.direct_emission_samples;
+         let bounce_count = app.config.bounce_count;
+         app.preview_push_constants = PreviewPushConstants {
++            lights_address: app.gpu_lights.gpu_address,
++            indirect_intensity: app.config.indirect_intensity,
++            pad: 0,
+             lights_count: app.cpu_lights.len() as u32,
+             sample_index: 0,
+             width: width,
+@@ -1121,7 +1258,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
+         r != 0 || g != 0 || b != 0
+     }
+ 
+-    if app.config.mis {
++    if app.config.mis && !app.config.is_preview {
+         let mut extract = |vertices: &[Vertex], indices: &[u32]| {
+             for primitive_id in 0..(indices.len() / 3) {
+                 let i0 = indices[primitive_id * 3 + 0] as usize;
+@@ -1218,11 +1355,15 @@ impl LightmapGroup {
+ 
+ impl Glim {
+     pub fn new(config: GlimConfig, output_dir: PathBuf) -> Glim {
++        Self::new_with_preview_mode(config, output_dir, false)
++    }
++
++    pub fn new_with_preview_mode(config: GlimConfig, output_dir: PathBuf, embedded_preview: bool) -> Glim {
+         unsafe { LOG_CALLBACK = config.log_callback };
+ 
+         let mut vulkan_config = VulkanConfig {
+             enable_validation_layers: config.vulkan_validation_layers,
+-            enable_window: config.is_preview,
++            enable_window: config.is_preview && !embedded_preview,
+             window_extensions: Vec::new(),
+         };
+ 
+@@ -1239,7 +1380,7 @@ impl Glim {
+         let mut vk = VulkanContext::new(&vulkan_config, create_surface_callback);
+         println!("Vulkan Initialized");
+ 
+-        if config.is_preview {
++        if config.is_preview && !embedded_preview {
+             vk.create_swapchain(
+                 config.preview_settings.width,
+                 config.preview_settings.height,
+@@ -1264,6 +1405,9 @@ impl Glim {
+         let gpu_lights = Buffer::null();
+ 
+         let preview_push_constants = PreviewPushConstants {
++            lights_address: 0,
++            indirect_intensity: config.indirect_intensity,
++            pad: 0,
+             lights_count: 0,
+             sample_index: 0,
+             width: 0,
+@@ -1332,9 +1476,14 @@ impl Glim {
+             vk,
+             meshes,
+             window: window,
++            embedded_preview,
++            preview_meshes: Vec::new(),
++            preview_reuse_groups: Vec::new(),
++            external_view: None,
+             config: config,
+             cpu_lights: Vec::new(),
+             preview_shader: ComputeShader::null(),
++            preview_surface_shader: ComputeShader::null(),
+             gpu_mesh: GpuMesh::null(),
+             tlas: VulkanAs::null(),
+             groups: Vec::new(),
+diff --git a/src/lights.rs b/src/lights.rs
+index e3d5fd4..6711031 100644
+--- a/src/lights.rs
++++ b/src/lights.rs
+@@ -1,4 +1,4 @@
+-use crate::math::{Vector2, Vector3};
++use crate::{bindings::CoordinateSystem, math::{Vector2, Vector3}};
+ 
+ #[repr(u8)]
+ #[derive(Debug, PartialEq)]
+@@ -58,3 +58,13 @@ impl Default for Light {
+         }
+     }
+ }
++
++impl Light {
++    // Shared by initial export and live updates so rotations use identical conventions.
++    pub fn convert_coordinate_system(&mut self, system: CoordinateSystem) {
++        self.position.transform_space(system);
++        self.direction.transform_space(system);
++        self.up.transform_space(system);
++        self.direction = Vector3::ZERO - self.direction;
++    }
++}
+diff --git a/src/mesh.rs b/src/mesh.rs
+index cbcb7bf..7063dda 100644
+--- a/src/mesh.rs
++++ b/src/mesh.rs
+@@ -42,10 +42,10 @@ pub struct FfiMesh {
+ #[derive(Debug, Clone, Copy)]
+ pub struct Vertex {
+     pub position: Vector3,
+-    lightmap_group: u8,
+-    resolution: u8,
+-    flags: u8,
+-    pad: u8,
++    pub(crate) lightmap_group: u8,
++    pub(crate) resolution: u8,
++    pub(crate) flags: u8,
++    pub(crate) pad: u8,
+ 
+     pub normal_octahedron: Vector2,
+     pub uv: Vector2,
+@@ -354,9 +354,9 @@ impl VulkanAs {
+         };
+ 
+         unsafe {
++            as_device.destroy_acceleration_structure(self.acceleration_structure, None);
+             vk.device.destroy_buffer(self.buffer, None);
+             vk.device.free_memory(self.memory, None);
+-            as_device.destroy_acceleration_structure(self.acceleration_structure, None);
+         };
+ 
+         self.gpu_address = 0;
+diff --git a/src/oidn.rs b/src/oidn.rs
+index c7a1d8c..a55185f 100644
+--- a/src/oidn.rs
++++ b/src/oidn.rs
+@@ -117,6 +117,10 @@ pub struct Oidn {
+ }
+ impl Oidn {
+     pub fn load() -> Result<Self, libloading::Error> {
++        Self::load_impl(true)
++    }
++
++    fn load_impl(report: bool) -> Result<Self, libloading::Error> {
+         let lib_name = if cfg!(windows) {
+             "OpenImageDenoise.dll"
+         } else if cfg!(target_os = "macos") {
+@@ -143,7 +147,7 @@ impl Oidn {
+         unsafe {
+             let lib = Library::new(&lib_path)?;
+ 
+-            Log::msg(&format!("Loading OIDN from {:?}", &lib_path));
++            if report { Log::msg(&format!("Loading OIDN from {:?}", &lib_path)); }
+ 
+             let new_device: FnNewDevice = *lib.get(b"oidnNewDevice\0")?;
+             let commit_device: FnCommitDevice = *lib.get(b"oidnCommitDevice\0")?;
+@@ -190,6 +194,61 @@ impl Oidn {
+         }
+     }
+ 
++    // Camera-space surface lighting uses OIDN's RT model and first-hit guides;
++    // baked UV lightmaps keep the existing RTLightmap filter above.
++    pub fn load_preview() -> Result<Self, String> {
++        let mut oidn = Self::load_impl(false).map_err(|e| e.to_string())?;
++        if let Some(error) = oidn.take_error() { return Err(error); }
++        unsafe {
++            let new_filter: FnNewFilter = *oidn._lib.get(b"oidnNewFilter\0").map_err(|e| e.to_string())?;
++            (oidn.release_filter)(oidn.filter);
++            oidn.filter = new_filter(oidn.device, c"RT".as_ptr());
++        }
++        if let Some(error) = oidn.take_error() { return Err(error); }
++        if oidn.filter.is_null() { return Err("OIDN RT filter is unavailable".into()); }
++        Ok(oidn)
++    }
++
++    pub fn denoise_surface(&mut self, lighting: &mut [f32], albedo: &[f32], normals: &[f32],
++        width: usize, height: usize) -> Result<(), String> {
++        let length = width.checked_mul(height).and_then(|n| n.checked_mul(4)).ok_or("OIDN dimensions overflow")?;
++        if length == 0 || lighting.len() != length || albedo.len() != length || normals.len() != length {
++            return Err("OIDN surface buffer sizes do not match".into());
++        }
++        let bytes = length * size_of::<f32>();
++        if !self.reserve_buffer(bytes * 3) { return Err("Could not allocate OIDN surface buffers".into()); }
++        unsafe {
++            for (slot, (name, data)) in [(c"color", &*lighting), (c"albedo", albedo), (c"normal", normals)].iter().enumerate() {
++                (self.write_buffer)(self.buffer, slot * bytes, bytes, data.as_ptr().cast());
++                (self.set_filter_image)(self.filter, name.as_ptr(), self.buffer, OIDNFormat::Float3,
++                    width, height, slot * bytes, 16, 0);
++            }
++            (self.set_filter_image)(self.filter, c"output".as_ptr(), self.buffer, OIDNFormat::Float3,
++                width, height, 0, 16, 0);
++            (self.set_filter_bool)(self.filter, c"hdr".as_ptr(), true);
++            (self.set_filter_bool)(self.filter, c"cleanAux".as_ptr(), true);
++            (self.commit_filter)(self.filter);
++            if let Some(error) = self.take_error() { return Err(error); }
++            (self.execute_filter)(self.filter);
++            (self.sync_device)(self.device);
++            if let Some(error) = self.take_error() { return Err(error); }
++            (self.read_buffer)(self.buffer, 0, bytes, lighting.as_mut_ptr().cast());
++        }
++        if let Some(error) = self.take_error() { return Err(error); }
++        Ok(())
++    }
++
++    fn take_error(&self) -> Option<String> {
++        unsafe {
++            let mut message = ptr::null();
++            let error = (self.get_device_error)(self.device, &mut message);
++            if error == OIDNError::None { None } else {
++                Some(if message.is_null() { format!("OIDN error {error:?}") }
++                    else { CStr::from_ptr(message).to_string_lossy().into_owned() })
++            }
++        }
++    }
++
+     pub fn reserve_buffer(&mut self, size: usize) -> bool {
+         if size <= self.buffer_size && !self.buffer.is_null() {
+             return true;
+@@ -291,7 +350,7 @@ impl Drop for Oidn {
+             if !self.buffer.is_null() {
+                 (self.release_buffer)(self.buffer);
+             }
+-            (self.release_filter)(self.filter);
++            if !self.filter.is_null() { (self.release_filter)(self.filter); }
+             (self.release_device)(self.device);
+         }
+     }
+diff --git a/src/preview_bridge.rs b/src/preview_bridge.rs
+new file mode 100644
+index 0000000..6c374fc
+--- /dev/null
++++ b/src/preview_bridge.rs
+@@ -0,0 +1,255 @@
++//! Owned, bounded mailboxes between the Unity thread and the Vulkan thread.
++use std::{collections::BTreeMap, sync::Mutex};
++use crate::{camera::InitializePreviewPushConstants, math::Vector3};
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug)]
++pub struct PreviewView {
++    pub origin: Vector3,
++    pub origin_dx: Vector3,
++    pub origin_dy: Vector3,
++    pub direction: Vector3,
++    pub direction_dx: Vector3,
++    pub direction_dy: Vector3,
++    pub width: u32,
++    pub height: u32,
++    pub revision: u32,
++}
++
++impl PreviewView {
++    fn valid(&self) -> bool {
++        self.width > 0 && self.height > 0 && self.width <= 2048 && self.height <= 2048 &&
++        self.revision != 0 &&
++        [self.origin, self.origin_dx, self.origin_dy, self.direction, self.direction_dx, self.direction_dy]
++            .iter().all(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) &&
++        self.direction.length_squared() > 0.000001
++    }
++
++    pub fn constants(&self) -> InitializePreviewPushConstants {
++        InitializePreviewPushConstants {
++            origin: self.origin, origin_pad: 0.0, origin_dx: self.origin_dx, origin_dx_pad: 0.0,
++            origin_dy: self.origin_dy, origin_dy_pad: 0.0,
++            direction: self.direction, direction_pad: 0.0, direction_dx: self.direction_dx, direction_dx_pad: 0.0,
++            direction_dy: self.direction_dy, direction_dy_pad: 0.0,
++        }
++    }
++}
++
++pub struct Frame {
++    pub revision: u32,
++    pub generation: u64,
++    pub samples: u32,
++    pub pixels: Vec<u8>,
++}
++
++#[derive(Default)]
++struct Bridge {
++    active: bool,
++    embedded: bool,
++    view: Option<PreviewView>,
++    emission_sizes: Vec<usize>,
++    emissions: BTreeMap<u32, Vec<u8>>,
++    frame: Option<Frame>,
++    generation: u64,
++    denoise: bool,
++    denoise_epoch: u64,
++    denoise_status: u32,
++    denoised: Option<Frame>,
++}
++
++static BRIDGE: Mutex<Bridge> = Mutex::new(Bridge {
++    active: false, embedded: false, view: None, emission_sizes: Vec::new(),
++    emissions: BTreeMap::new(), frame: None,
++    generation: 0, denoise: false, denoise_epoch: 0, denoise_status: 0, denoised: None,
++});
++
++pub fn reset(active: bool, embedded: bool) {
++    *BRIDGE.lock().unwrap_or_else(|e| e.into_inner()) = Bridge { active, embedded, ..Default::default() };
++}
++
++pub fn register_emissions(sizes: Vec<usize>) {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    bridge.emission_sizes = sizes;
++    bridge.emissions.clear();
++    bridge.frame = None;
++}
++
++pub fn take_emissions() -> BTreeMap<u32, Vec<u8>> {
++    std::mem::take(&mut BRIDGE.lock().unwrap_or_else(|e| e.into_inner()).emissions)
++}
++
++pub fn take_view() -> Option<PreviewView> {
++    BRIDGE.lock().unwrap_or_else(|e| e.into_inner()).view.take()
++}
++
++pub fn publish_frame(frame: Frame) {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if bridge.active && bridge.embedded { bridge.frame = Some(frame); }
++}
++
++pub fn begin_generation(generation: u64) {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    bridge.generation = generation;
++    bridge.frame = None;
++    bridge.denoised = None;
++    if bridge.denoise && bridge.denoise_status != 4 { bridge.denoise_status = 1; }
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn app_set_preview_denoise(enabled: bool) -> bool {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if !bridge.active || !bridge.embedded { return false; }
++    if bridge.denoise != enabled {
++        bridge.denoise = enabled;
++        bridge.denoise_epoch += 1;
++        bridge.denoised = None;
++        bridge.denoise_status = if enabled { 1 } else { 0 };
++    }
++    true
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn app_preview_denoise_status() -> u32 {
++    BRIDGE.lock().unwrap_or_else(|e| e.into_inner()).denoise_status
++}
++
++pub fn denoise_request() -> Option<u64> {
++    let bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    (bridge.active && bridge.denoise && bridge.denoise_status != 4).then_some(bridge.denoise_epoch)
++}
++
++pub fn denoise_status(epoch: u64, status: u32) {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if bridge.active && bridge.denoise && bridge.denoise_epoch == epoch { bridge.denoise_status = status; }
++}
++
++pub fn publish_denoised(epoch: u64, frame: Frame) {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if bridge.active && bridge.denoise && bridge.denoise_epoch == epoch && bridge.generation == frame.generation {
++        bridge.denoised = Some(frame);
++        bridge.denoise_status = 3;
++    }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_copy_preview_frame_hdr(pixels: *mut u8, capacity: u32, revision: u32, generation: *mut u64) -> u32 {
++    if pixels.is_null() || generation.is_null() { return 0; }
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    let Some(frame) = bridge.frame.as_ref() else { return 0; };
++    if frame.revision != revision || frame.pixels.len() != capacity as usize { return 0; }
++    let frame = bridge.frame.take().unwrap();
++    unsafe {
++        std::ptr::copy_nonoverlapping(frame.pixels.as_ptr(), pixels, frame.pixels.len());
++        *generation = frame.generation;
++    }
++    frame.samples
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_copy_preview_denoised(pixels: *mut u8, capacity: u32, revision: u32, generation: u64) -> u32 {
++    if pixels.is_null() { return 0; }
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if !bridge.denoise || bridge.generation != generation { return 0; }
++    let Some(frame) = bridge.denoised.as_ref() else { return 0; };
++    if frame.revision != revision || frame.generation != generation || frame.pixels.len() != capacity as usize { return 0; }
++    let frame = bridge.denoised.take().unwrap();
++    unsafe { std::ptr::copy_nonoverlapping(frame.pixels.as_ptr(), pixels, frame.pixels.len()); }
++    frame.samples
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn app_update_preview_view(view: PreviewView) -> bool {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if !bridge.active || !bridge.embedded || !view.valid() { return false; }
++    bridge.view = Some(view);
++    true
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_update_preview_emission(group: u32, pixels: *const u8, length: u32) -> bool {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if !bridge.active || pixels.is_null() || length == 0 ||
++        bridge.emission_sizes.get(group as usize).copied() != Some(length as usize) { return false; }
++    // One latest atlas per group, copied before the managed array can move.
++    bridge.emissions.insert(group, unsafe { std::slice::from_raw_parts(pixels, length as usize) }.to_vec());
++    true
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_copy_preview_frame(pixels: *mut u8, capacity: u32, revision: u32) -> u32 {
++    if pixels.is_null() { return 0; }
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    let Some(frame) = bridge.frame.as_ref() else { return 0; };
++    if frame.revision != revision || frame.pixels.len() != capacity as usize { return 0; }
++    let frame = bridge.frame.take().unwrap();
++    unsafe { std::ptr::copy_nonoverlapping(frame.pixels.as_ptr(), pixels, frame.pixels.len()); }
++    frame.samples
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn view_layout_and_validation() {
++        assert_eq!(size_of::<PreviewView>(), 84);
++        assert_eq!(size_of::<InitializePreviewPushConstants>(), 96);
++        assert_eq!(std::mem::offset_of!(InitializePreviewPushConstants, direction), 48);
++        assert_eq!(std::mem::offset_of!(InitializePreviewPushConstants, direction_dy), 80);
++        assert_eq!(std::mem::offset_of!(PreviewView, revision), 80);
++        let mut view = PreviewView { origin: Vector3::ZERO, origin_dx: Vector3::ZERO,
++            origin_dy: Vector3::ZERO, direction: Vector3::new(0.0, 0.0, -1.0),
++            direction_dx: Vector3::ZERO, direction_dy: Vector3::ZERO,
++            width: 640, height: 360, revision: 1 };
++        assert!(view.valid());
++        view.height = 0; assert!(!view.valid());
++        view.height = 360; view.origin.x = f32::NAN; assert!(!view.valid());
++    }
++
++    #[test]
++    fn bridge_coalesces_atlases_checks_sizes_and_rejects_stale_frames() {
++        reset(true, true);
++        register_emissions(vec![4, 8]);
++        let pixels = [1u8; 8];
++        unsafe {
++            assert!(!app_update_preview_emission(0, pixels.as_ptr(), 8));
++            assert!(!app_update_preview_emission(2, pixels.as_ptr(), 8));
++            assert!(app_update_preview_emission(0, pixels.as_ptr(), 4));
++            assert!(app_update_preview_emission(0, pixels.as_ptr(), 4));
++            assert!(app_update_preview_emission(1, pixels.as_ptr(), 8));
++        }
++        assert_eq!(take_emissions().len(), 2);
++        assert!(take_emissions().is_empty());
++        publish_frame(Frame { revision: 7, generation: 0, samples: 3, pixels: pixels.to_vec() });
++        let mut dst = [0u8; 8];
++        unsafe {
++            assert_eq!(app_copy_preview_frame(dst.as_mut_ptr(), 8, 6), 0);
++            assert_eq!(app_copy_preview_frame(dst.as_mut_ptr(), 4, 7), 0);
++            assert_eq!(app_copy_preview_frame(dst.as_mut_ptr(), 8, 7), 3);
++            assert_eq!(dst, pixels);
++            assert_eq!(app_copy_preview_frame(dst.as_mut_ptr(), 8, 7), 0);
++        }
++        // Delayed OIDN output may never cross light/camera changes or a toggle epoch.
++        assert!(app_set_preview_denoise(true));
++        let epoch = denoise_request().unwrap();
++        begin_generation(2);
++        let frame = |generation| Frame { revision: 7, generation, samples: 8, pixels: pixels.to_vec() };
++        publish_denoised(epoch, frame(1));
++        unsafe { assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 8, 7, 2), 0); }
++        publish_denoised(epoch, frame(2));
++        unsafe {
++            assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 8, 6, 2), 0);
++            assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 8, 7, 1), 0);
++            assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 4, 7, 2), 0);
++            assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 8, 7, 2), 8);
++        }
++        assert!(app_set_preview_denoise(false));
++        assert!(app_set_preview_denoise(true));
++        publish_denoised(epoch, frame(2));
++        unsafe { assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 8, 7, 2), 0); }
++        publish_denoised(denoise_request().unwrap(), frame(2));
++        begin_generation(3);
++        unsafe { assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 8, 7, 2), 0); }
++        reset(false, false);
++        unsafe { assert!(!app_update_preview_emission(0, pixels.as_ptr(), 4)); }
++    }
++}
+diff --git a/src/preview_denoise.rs b/src/preview_denoise.rs
+new file mode 100644
+index 0000000..ce9054c
+--- /dev/null
++++ b/src/preview_denoise.rs
+@@ -0,0 +1,238 @@
++//! OIDN works on demodulated surface lighting; materials/emission stay untouched.
++use std::{sync::mpsc, thread, time::{Duration, Instant}};
++use ash::vk::{self, Handle};
++use crate::{*, preview_bridge::{self as bridge, Frame}};
++
++#[repr(C)]
++#[derive(Clone, Copy, Default)]
++pub struct SurfaceSample {
++    pub lighting: [f32; 4], pub albedo: [f32; 4], pub normal: [f32; 4], pub emission: [f32; 4],
++}
++
++#[repr(C)]
++pub struct SurfacePush { output_address: u64, width: u32, height: u32 }
++
++struct Job {
++    epoch: u64, generation: u64, revision: u32, samples: u32,
++    width: usize, height: usize, surface: Vec<SurfaceSample>,
++}
++struct Finished { epoch: u64, result: Result<Frame, String> }
++
++fn filter(oidn: &mut Oidn, job: Job) -> Result<Frame, String> {
++    let count = job.surface.len();
++    let mut planes = vec![0f32; count * 12];
++    let (lighting, aux) = planes.split_at_mut(count * 4);
++    let (albedo, normal) = aux.split_at_mut(count * 4);
++    for (i, s) in job.surface.iter().enumerate() {
++        lighting[i*4..i*4+4].copy_from_slice(&s.lighting);
++        // Color is already demodulated: its matching albedo is white. Feeding
++        // the original colored texture here would teach OIDN a false color edge.
++        albedo[i*4..i*4+4].fill(if s.normal[3] != 0. { 1. } else { 0. });
++        normal[i*4..i*4+4].copy_from_slice(&s.normal);
++    }
++    // Exact darkness needs no inference, and primary emission must stay exact.
++    if lighting.iter().any(|v| *v != 0.) {
++        oidn.denoise_surface(lighting, albedo, normal, job.width, job.height)?;
++    }
++    let mut pixels = Vec::with_capacity(count * 16);
++    for (i, surface) in job.surface.iter().enumerate() {
++        for channel in 0..4 {
++            let value = if channel == 3 || surface.normal[3] == 0. { surface.emission[channel] }
++                else { lighting[i*4+channel].max(0.) * surface.albedo[channel] + surface.emission[channel] };
++            if !value.is_finite() { return Err("OIDN returned non-finite surface lighting".into()); }
++            pixels.extend(value.to_ne_bytes());
++        }
++    }
++    Ok(Frame { revision: job.revision, generation: job.generation, samples: job.samples, pixels })
++}
++
++struct Worker {
++    sender: Option<mpsc::SyncSender<Job>>, receiver: mpsc::Receiver<Finished>,
++    thread: Option<thread::JoinHandle<()>>, busy: bool,
++}
++
++impl Worker {
++    fn new() -> Self {
++        let (sender, jobs) = mpsc::sync_channel::<Job>(1);
++        let (results, receiver) = mpsc::channel();
++        let thread = thread::spawn(move || {
++            // Device, filter and buffers live and are destroyed on this thread.
++            let mut oidn = Oidn::load_preview();
++            while let Ok(job) = jobs.recv() {
++                let epoch = job.epoch;
++                let result = match &mut oidn {
++                    Ok(oidn) => filter(oidn, job),
++                    Err(error) => Err(error.clone()),
++                };
++                if results.send(Finished { epoch, result }).is_err() { break; }
++            }
++        });
++        Self { sender: Some(sender), receiver, thread: Some(thread), busy: false }
++    }
++}
++
++impl Drop for Worker {
++    fn drop(&mut self) {
++        self.sender.take();
++        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
++    }
++}
++
++pub struct Pipeline {
++    worker: Option<Worker>, buffer: Buffer,
++    submitted: Option<(u64, u64, u32)>, last_submit: Instant,
++}
++
++impl Pipeline {
++    pub fn new() -> Self {
++        Self { worker: None, buffer: Buffer::null(), submitted: None,
++            last_submit: Instant::now() - Duration::from_secs(1) }
++    }
++
++    pub fn update(&mut self, app: &mut Glim, generation: u64) {
++        if let Some(worker) = &mut self.worker {
++            if worker.busy && worker.thread.as_ref().is_some_and(|thread| thread.is_finished()) {
++                worker.busy = false;
++                if let Some(epoch) = bridge::denoise_request() { bridge::denoise_status(epoch, 4); }
++                Log::msg("Surface denoising worker stopped unexpectedly; showing raw HDR lighting.");
++            }
++            if let Ok(done) = worker.receiver.try_recv() {
++                worker.busy = false;
++                match done.result {
++                    Ok(frame) => bridge::publish_denoised(done.epoch, frame),
++                    Err(error) => {
++                        bridge::denoise_status(done.epoch, 4);
++                        Log::msg(&format!("Surface denoising unavailable: {error}. Check OpenImageDenoise_DIR; the raw HDR preview remains available."));
++                    }
++                }
++            }
++        }
++        let Some(epoch) = bridge::denoise_request() else {
++            if self.worker.as_ref().map(|w| !w.busy).unwrap_or(false) { self.worker = None; }
++            if !self.buffer.buffer.is_null() { self.buffer.destroy(&app.vk); }
++            self.submitted = None;
++            return;
++        };
++        let samples = app.preview_push_constants.sample_index;
++        if samples < app.preview_push_constants.max_samples.min(8) || samples == 0 { return; }
++        if self.worker.as_ref().map(|w| w.busy).unwrap_or(false) { return; }
++        let stamp = (epoch, generation, samples);
++        if self.submitted == Some(stamp) { return; }
++        if self.submitted.map(|s| s.0 == epoch && s.1 == generation).unwrap_or(false) &&
++            self.last_submit.elapsed() < Duration::from_millis(500) { return; }
++        let view = app.external_view.unwrap();
++        let surface = capture(app, &mut self.buffer);
++        let worker = self.worker.get_or_insert_with(Worker::new);
++        let job = Job { epoch, generation, revision: view.revision, samples,
++            width: view.width as usize, height: view.height as usize, surface };
++        if worker.sender.as_ref().unwrap().try_send(job).is_ok() {
++            worker.busy = true; self.submitted = Some(stamp); self.last_submit = Instant::now();
++            bridge::denoise_status(epoch, 2);
++        }
++    }
++
++    pub fn destroy(&mut self, app: &Glim) {
++        self.worker = None; // Join before the DLL/render session can be destroyed.
++        if !self.buffer.buffer.is_null() { self.buffer.destroy(&app.vk); }
++    }
++}
++
++fn capture(app: &mut Glim, buffer: &mut Buffer) -> Vec<SurfaceSample> {
++    let width = app.config.preview_settings.width;
++    let height = app.config.preview_settings.height;
++    let count = width as usize * height as usize;
++    let bytes = count as u64 * size_of::<SurfaceSample>() as u64;
++    if buffer.bytes != bytes || buffer.buffer.is_null() {
++        if !buffer.buffer.is_null() { buffer.destroy(&app.vk); }
++        *buffer = Buffer::empty(&app.vk, "Preview surface lighting and guides".into(), bytes,
++            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
++            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
++    }
++    let bindings = ShaderBindings {
++        tlas: app.tlas.acceleration_structure,
++        albedos: &app.albedo_array.views(), emissions: &app.emission_array.views(),
++        cookies: &app.cookie_array.views(), alphas: &app.alphas_array.views(),
++        skybox: app.skybox.view(), skybox_sampler: app.skybox.sampler(),
++        visibility: app.render_target.visibility.view(), preview_diffuse: app.render_target.diffuse.view(),
++        linear_sampler: app.linear_sampler,
++    };
++    if app.preview_surface_shader.pipeline.is_null() {
++        app.preview_surface_shader = load_compute_shader(&app.vk, ShaderName::PreviewSurface,
++            &app.constants, &bindings, size_of::<SurfacePush>());
++    }
++    update_compute_shader(&app.vk, &app.preview_surface_shader, &bindings);
++    let cmd = app.vk.begin_single_use_cmd();
++    let diffuse = &mut app.render_target.diffuse;
++    let barrier = diffuse.barrier(vk::ImageLayout::GENERAL,
++        vk::AccessFlags::MEMORY_WRITE | vk::AccessFlags::MEMORY_READ, vk::AccessFlags::SHADER_READ);
++    unsafe {
++        app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
++            vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
++        let shader = &app.preview_surface_shader;
++        app.vk.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, shader.pipeline);
++        app.vk.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, shader.pipeline_layout,
++            0, &[shader.descriptor_set], &[]);
++        let push = SurfacePush { output_address: buffer.gpu_address, width, height };
++        app.vk.device.cmd_push_constants(cmd, shader.pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, &as_bytes(&push));
++        app.vk.device.cmd_dispatch(cmd, width.div_ceil(8), height.div_ceil(8), 1);
++        let barrier = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::SHADER_WRITE)
++            .dst_access_mask(vk::AccessFlags::HOST_READ);
++        app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::COMPUTE_SHADER,
++            vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
++    }
++    app.vk.end_single_use_cmd(cmd);
++    unsafe { std::slice::from_raw_parts(buffer.ptr.cast::<SurfaceSample>(), count).to_vec() }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    #[ignore = "requires the installed Open Image Denoise runtime"]
++    fn oidn_surface_lighting_preserves_materials_emission_and_hdr() {
++        let mut oidn = Oidn::load_preview().expect("OIDN runtime");
++        eprintln!("Surface OIDN device: {:?}", oidn.device_type());
++        let (width, height) = (96, 96);
++        let mut state = 127u32;
++        let mut before = 0f64;
++        let surface: Vec<_> = (0..width*height).map(|i| {
++            let x = i % width;
++            let level = if x < width/2 { 2. } else { 8. };
++            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
++            let noise = ((state >> 8) as f32 / 16777216. - 0.5) * level;
++            before += (noise as f64).powi(2);
++            let tint = if i % 2 == 0 { [0.2, 0.8, 0.4, 1.] } else { [0.8, 0.2, 0.4, 1.] };
++            SurfaceSample { lighting: [level+noise, level+noise, level+noise, 0.], albedo: tint,
++                normal: if x < width/2 { [0.,0.,1.,1.] } else { [0.,1.,0.,1.] },
++                emission: [if i % 19 == 0 { 17. } else { 0. }, 0., 0., 1.] }
++        }).collect();
++        let mut reference: Vec<f32> = surface.iter().flat_map(|s| s.lighting).collect();
++        let guides = vec![1f32; width*height*4];
++        let normals: Vec<f32> = surface.iter().flat_map(|s| s.normal).collect();
++        oidn.denoise_surface(&mut reference, &guides, &normals, width, height).unwrap();
++        let result = filter(&mut oidn, Job { epoch: 1, generation: 7, revision: 3, samples: 8,
++            width, height, surface: surface.clone() }).unwrap();
++        let values: Vec<f32> = result.pixels.chunks_exact(4).map(|b| f32::from_ne_bytes(b.try_into().unwrap())).collect();
++        let mut after = 0f64;
++        for (i, pixel) in values.chunks_exact(4).enumerate() {
++            let level = if i % width < width/2 { 2. } else { 8. };
++            let s = surface[i];
++            // Check recomposition against the actual neural filter, including
++            // sharp checker albedo and isolated HDR emission pixels.
++            for c in 0..3 {
++                let expected = reference[i*4+c].max(0.)*s.albedo[c]+s.emission[c];
++                assert!((pixel[c]-expected).abs() < 0.0001, "Material or emission was filtered");
++                after += (((pixel[c]-s.emission[c])/s.albedo[c]-level) as f64).powi(2)/3.;
++            }
++            assert_eq!(pixel[3], 1.);
++            if s.emission[0] > 0. { assert!(pixel[0] >= 17.); }
++
++        }
++        eprintln!("HDR lighting squared error: {before:.4} -> {after:.4}");
++        assert!(after < before*0.4, "OIDN did not reduce surface lighting noise");
++        let surface = vec![SurfaceSample { emission: [12.,3.,2.,1.], ..Default::default() }; 16];
++        let sky = filter(&mut oidn, Job { epoch: 1, generation: 8, revision: 4, samples: 8,
++            width: 4, height: 4, surface }).unwrap();
++        assert!(sky.pixels.chunks_exact(16).all(|p| p == [12f32,3.,2.,1.].map(f32::to_ne_bytes).concat()));
++    }
++}
+diff --git a/src/preview_embedded.rs b/src/preview_embedded.rs
+new file mode 100644
+index 0000000..646afe0
+--- /dev/null
++++ b/src/preview_embedded.rs
+@@ -0,0 +1,360 @@
++use std::time::{Duration, Instant};
++use ash::vk;
++use ash::vk::Handle;
++use crate::{*, preview_bridge::Frame};
++
++fn bind_preview(app: &mut Glim) {
++    let bindings = ShaderBindings {
++        tlas: app.tlas.acceleration_structure,
++        albedos: &app.albedo_array.views(), emissions: &app.emission_array.views(),
++        skybox: app.skybox.view(), skybox_sampler: app.skybox.sampler(),
++        visibility: app.render_target.visibility.view(),
++        preview_diffuse: app.render_target.diffuse.view(),
++        cookies: &app.cookie_array.views(), alphas: &app.alphas_array.views(),
++        linear_sampler: app.linear_sampler,
++    };
++    if app.preview_shader.pipeline.is_null() {
++        app.preview_shader = load_compute_shader(&app.vk, ShaderName::Preview,
++            &app.constants, &bindings, size_of::<PreviewPushConstants>());
++    }
++    update_compute_shader(&app.vk, &app.preview_shader, &bindings);
++}
++
++// Headless Vulkan uses the same path tracing shader as the separate window.
++// A bounded CPU readback also works when Unity runs D3D11 instead of Vulkan.
++pub fn render(app: &mut Glim) {
++    let mut readback = Buffer::null();
++    let mut denoise = preview_denoise::Pipeline::new();
++    let mut generation = 0u64;
++    let mut last_frame = Instant::now() - Duration::from_secs(1);
++    while !bindings::is_cancelled() {
++        let started = Instant::now();
++        if let Some(view) = preview_bridge::take_view() {
++            let resize = app.external_view.map(|v| v.width != view.width || v.height != view.height).unwrap_or(true);
++            app.external_view = Some(view);
++            if resize {
++                unsafe { app.vk.device.device_wait_idle().unwrap(); }
++                app.config.preview_settings.width = view.width;
++                app.config.preview_settings.height = view.height;
++                let settings = app.config.preview_settings.clone();
++                update_render_target(app, &settings);
++                bind_preview(app);
++                if !readback.buffer.is_null() { readback.destroy(&app.vk); }
++                readback = Buffer::empty(&app.vk, "Scene view readback".into(),
++                    view.width as u64 * view.height as u64 * 16,
++                    vk::BufferUsageFlags::TRANSFER_DST,
++                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
++            }
++            app.preview_initialized = false;
++        }
++        apply_preview_updates(app);
++        let Some(view) = app.external_view else {
++            std::thread::sleep(Duration::from_millis(10));
++            continue;
++        };
++        if !app.preview_initialized {
++            app.preview_push_constants.sample_index = 0;
++            generation += 1;
++            preview_bridge::begin_generation(generation);
++        }
++        if app.preview_push_constants.sample_index >= app.preview_push_constants.max_samples {
++            denoise.update(app, generation);
++            std::thread::sleep(Duration::from_millis(10));
++            continue;
++        }
++        let cmd = app.vk.begin_single_use_cmd();
++        record_preview_sample(app, cmd);
++        let samples = app.preview_push_constants.sample_index;
++        let copy = samples == 1 || samples == app.preview_push_constants.max_samples ||
++            last_frame.elapsed() >= Duration::from_millis(66);
++        if copy {
++            let diffuse = &mut app.render_target.diffuse;
++            let barrier = diffuse.barrier(vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
++                vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::TRANSFER_READ);
++            unsafe {
++                app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::COMPUTE_SHADER,
++                    vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
++                let region = vk::BufferImageCopy::default()
++                    .image_subresource(vk::ImageSubresourceLayers::default()
++                        .aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1))
++                    .image_extent(vk::Extent3D { width: view.width, height: view.height, depth: 1 });
++                app.vk.device.cmd_copy_image_to_buffer(cmd, diffuse.image(),
++                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL, readback.buffer, &[region]);
++                let barrier = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
++                    .dst_access_mask(vk::AccessFlags::HOST_READ);
++                app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER,
++                    vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
++            }
++        }
++        // This waits for completion before the mapped memory is read or resources change.
++        app.vk.end_single_use_cmd(cmd);
++        if copy {
++            let pixels = unsafe { std::slice::from_raw_parts(readback.ptr.cast::<u8>(), readback.bytes as usize) }.to_vec();
++            preview_bridge::publish_frame(Frame { revision: view.revision, generation, samples, pixels });
++            last_frame = Instant::now();
++        }
++        denoise.update(app, generation);
++        let throttle = Duration::from_millis(app.config.throttle_preview_ms.max(1) as u64);
++        if let Some(delay) = throttle.checked_sub(started.elapsed()) { std::thread::sleep(delay); }
++    }
++    denoise.destroy(app);
++    if !readback.buffer.is_null() { readback.destroy(&app.vk); }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{bindings::*, math::*, mesh::FfiMesh, preview_bridge::*};
++
++    extern "C" fn log(data: Log) { if matches!(data.ty, LogType::Error) { eprintln!("{}", data.message.to_string()); } }
++    extern "C" fn probes(_: LightprobesReadbackData) {}
++
++    #[test]
++    #[ignore = "requires a Vulkan GPU; run explicitly, without other preview tests"]
++    fn embedded_gpu_emission_camera_and_resize() {
++        for hardware in [true, false] { gpu_scene_updates(hardware); }
++    }
++
++    fn gpu_scene_updates(hardware: bool) {
++        let config = GlimConfig {
++            coordinate_system: CoordinateSystem::Default, is_preview: true,
++            vulkan_validation_layers: false, seams_debug: false, hardware_rt: hardware,
++            throttle_preview_ms: 1, preview_settings: LightmapSettings {
++                width: 32, height: 32, dilate: false, denoise: false, fix_seams: false, discard: false },
++            camera_position: Vector3::ZERO, camera_forward: Vector3::FORWARD,
++            log_callback: log, lightprobes_read_callback: probes, probe_samples: 1,
++            light_falloff: LightFalloffType::InverseSquare, mis: true,
++            direct_light_samples: 8, direct_emission_samples: 8, indirect_samples: 8,
++            bounce_count: 0, lightmap_mode: LightmapMode::NonDirectional,
++            skybox_intensity: 0.0, indirect_intensity: 1.0, lightprobe_deringing: 0.0,
++            emissive_multiplier: 1.0, ao_intensity: 0.0, ao_range: 1.0,
++            coverage_max_samples: 4, coverage_min_threshold: 0.05, antialiasing: true, leak_detection: true,
++        };
++        let app = app_new_embedded_preview(config, FfiString::new("temp"));
++        assert!(!app.is_null());
++        let vertices = [Vector3::new(-2.0,-2.0,-2.0), Vector3::new(2.0,-2.0,-2.0),
++            Vector3::new(2.0,2.0,-2.0), Vector3::new(-2.0,2.0,-2.0)];
++        let normals = [Vector3::new(0.0,0.0,1.0);4];
++        let uv = [Vector2::new(0.1,0.1),Vector2::new(0.9,0.1),Vector2::new(0.9,0.9),Vector2::new(0.1,0.9)];
++        let indices = [0,1,2,0,2,3];
++        let black = [0u8; 64];
++        let white = [255u8; 64];
++        app_add_lightmap_group(app, LightmapSettings { width: 4, height: 4,
++            dilate: false, denoise: false, fix_seams: false, discard: false },
++            white.as_ptr(), 64, black.as_ptr(), 64);
++        app_add_mesh(app, FfiMesh { vertices: vertices.as_ptr(), normals: normals.as_ptr(),
++            lightmap_uvs: uv.as_ptr(), main_uvs: uv.as_ptr(), indices: indices.as_ptr(),
++            vertices_length: 4, indices_length: 6, lightmap_group: 0, backface_gi: true,
++            emissive: false, fix_seams: false, transparent: false, no_shadows: false,
++            alpha_index: -1, alpha_wrap: false, cutoff: 0.5 });
++        app_set_skybox(app, [0f32;24].as_ptr(), 24, 1, 1);
++        let mut view = PreviewView { origin: Vector3::new(-1.0,1.0,0.0),
++            origin_dx: Vector3::new(2.0,0.0,0.0), origin_dy: Vector3::new(0.0,-2.0,0.0),
++            direction: Vector3::FORWARD, direction_dx: Vector3::ZERO, direction_dy: Vector3::ZERO,
++            width: 32, height: 32, revision: 1 };
++        assert!(app_update_preview_view(view));
++        let address = app as usize;
++        let renderer = std::thread::spawn(move || { app_run(address as *mut Glim); app_destroy(address as *mut Glim); });
++        // Always stop and join the renderer, even if an assertion fails.
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let frame_generation = std::cell::Cell::new(0u64);
++            let read = |view: PreviewView| -> Vec<f32> {
++                let until = Instant::now() + Duration::from_secs(30);
++                let mut values = vec![0f32; view.width as usize * view.height as usize * 4];
++                loop {
++                    let mut generation = 0;
++                    let samples = unsafe { app_copy_preview_frame_hdr(values.as_mut_ptr().cast(),
++                        (values.len() * 4) as u32, view.revision, &mut generation) };
++                    if samples >= 8 { frame_generation.set(generation); return values; }
++                    assert!(Instant::now() < until, "Timed out waiting for preview revision {}", view.revision);
++                    std::thread::sleep(Duration::from_millis(10));
++                }
++            };
++            let denoised = |view: PreviewView| -> Vec<f32> {
++                let until = Instant::now() + Duration::from_secs(60);
++                let mut values = vec![0f32; view.width as usize * view.height as usize * 4];
++                loop {
++                    let samples = unsafe { app_copy_preview_denoised(values.as_mut_ptr().cast(),
++                        (values.len()*4) as u32, view.revision, frame_generation.get()) };
++                    if samples != 0 { return values; }
++                    assert_ne!(app_preview_denoise_status(), 4, "OIDN failed");
++                    assert!(Instant::now() < until, "Timed out waiting for OIDN");
++                    std::thread::sleep(Duration::from_millis(10));
++                }
++            };
++            assert!(read(view).chunks_exact(4).all(|p| p[0] < 0.001));
++            let red: Vec<u8> = (0..16).flat_map(|_| texture2d::encode_r11g11b10(2.0,0.0,0.0)).collect();
++            assert!(unsafe { app_update_preview_emission(0, red.as_ptr(), 64) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            let lit = read(view);
++            assert!(lit.chunks_exact(4).all(|p| p[0] > 1.9 && p[1] < 0.001), "Emission did not update");
++            assert!(app_set_preview_denoise(true));
++            assert_eq!(denoised(view), lit, "Surface denoiser changed primary HDR emission");
++            assert!(app_set_preview_denoise(false));
++            assert!(app_set_preview_denoise(true));
++            assert_eq!(denoised(view), lit, "Enabling OIDN after convergence failed");
++            view.width = 48; view.height = 24; view.revision += 1;
++            assert!(app_update_preview_view(view));
++            let resized = read(view);
++            assert_eq!(resized.len(), 48*24*4);
++            assert_eq!(denoised(view), resized, "OIDN did not resize with the camera");
++            let mut moved = crate::preview_geometry::TransformState { mesh_id: 0,
++                position_rows: [[1.,0.,0.,100.],[0.,1.,0.,0.],[0.,0.,1.,0.]],
++                normal_rows: [[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]], flip_winding: 0 };
++            assert!(unsafe { crate::preview_geometry::app_update_preview_transforms(&moved, 1) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            assert!(read(view).chunks_exact(4).all(|p| p[0] < 0.001), "Moved mesh still occupies its old position");
++            moved.position_rows[0][3] = 0.;
++            assert!(unsafe { crate::preview_geometry::app_update_preview_transforms(&moved, 1) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            assert!(read(view).chunks_exact(4).all(|p| p[0] > 1.9), "Restored transform did not restore geometry");
++            moved.position_rows[0][0] = -0.25;
++            moved.normal_rows[0][0] = -4.; moved.flip_winding = 1;
++            assert!(unsafe { crate::preview_geometry::app_update_preview_transforms(&moved, 1) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            let narrow = read(view);
++            assert!(narrow[4 * (12*48)] < 0.001 && narrow[4 * (12*48+24)] > 1.9, "Mirrored nonuniform scale was not applied");
++            moved.position_rows = [[0.,-1.,0.,0.],[-0.25,0.,0.,0.],[0.,0.,1.,0.]];
++            moved.normal_rows = [[0.,-1.,0.,0.],[-4.,0.,0.,0.],[0.,0.,1.,0.]];
++            assert!(unsafe { crate::preview_geometry::app_update_preview_transforms(&moved, 1) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            let rotated = read(view);
++            assert!(rotated[4 * 24] < 0.001 && rotated[4 * (12*48)] > 1.9, "Rotation was not applied");
++            assert!(unsafe { app_update_preview_emission(0, black.as_ptr(), 64) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            assert!(read(view).chunks_exact(4).all(|p| p[0] < 0.001));
++            assert!(unsafe { app_update_preview_emission(0, red.as_ptr(), 64) });
++            view.origin.x = 100.0; view.revision += 1;
++            assert!(app_update_preview_view(view));
++            assert!(read(view).chunks_exact(4).all(|p| p[0] < 0.001), "Camera frame did not move");
++            assert!(denoised(view).chunks_exact(4).all(|p| p[0] < 0.001), "OIDN retained stale geometry/emission");
++            // Exercise the complete GPU capture -> OIDN -> recomposition path
++            // with reflected illumination, then a live light deletion at one camera revision.
++            view.origin.x = -1.; view.revision += 1;
++            assert!(app_update_preview_view(view));
++            let light = crate::preview_updates::PreviewLightState {
++                color: Vector3::new(6.,6.,6.), position: Vector3::ZERO,
++                direction: Vector3::new(0.,0.,-1.), up: Vector3::new(0.,1.,0.),
++                range: 20., spot_inner_percent: 80., spot_outer: 45., area_size: Vector2::new(1.,1.),
++                ty: 0, cast_shadows: 0, mixed: 0, cookie: u32::MAX, shadow_radius_or_angle: 0.,
++            };
++            assert!(unsafe { crate::preview_updates::app_update_preview_lights(&light, 1) });
++            let lit = read(view);
++            let filtered = denoised(view);
++            let center = 4*(view.width as usize*(view.height as usize/2)+view.width as usize/2);
++            assert!(lit[center+1] > 1., "Test surface has no reflected HDR illumination");
++            assert!(filtered[center+1] > 1. && filtered.iter().all(|v| v.is_finite()), "Surface lighting lost HDR in OIDN");
++            let old_generation = frame_generation.get();
++            assert!(unsafe { crate::preview_updates::app_update_preview_lights(std::ptr::null(), 0) });
++            let unlit = read(view);
++            assert!(frame_generation.get() > old_generation, "Light edits did not invalidate OIDN");
++            assert_eq!(denoised(view), unlit, "Old denoised lighting survived a light edit");
++            assert!(app_set_preview_denoise(false));
++            // Delete every mesh, add two objects with distinct material groups,
++            // then repeat. Exercise descriptor counts and empty BVH transitions.
++            view.origin.x = -1.0;
++            for populated in [false, true, false, true] {
++                use crate::preview_scene::*;
++                let scene = app_new_preview_scene(CoordinateSystem::Default);
++                if populated {
++                    for group in 0..2 {
++                        let emission: Vec<u8> = (0..16).flat_map(|_| if group == 0 {
++                            texture2d::encode_r11g11b10(2.,0.,0.)
++                        } else { texture2d::encode_r11g11b10(0.,3.,0.) }).collect();
++                        unsafe { preview_scene_add_group(scene, LightmapSettings { width: 4, height: 4,
++                            dilate: false, denoise: false, fix_seams: false, discard: false },
++                            white.as_ptr(), 64, emission.as_ptr(), 64); }
++                        let left = group as f32 - 1.;
++                        let points = [Vector3::new(left,-2.,-2.), Vector3::new(left+1.,-2.,-2.),
++                            Vector3::new(left+1.,2.,-2.), Vector3::new(left,2.,-2.)];
++                        unsafe { preview_scene_add_mesh(scene, FfiMesh { vertices: points.as_ptr(), normals: normals.as_ptr(),
++                            lightmap_uvs: uv.as_ptr(), main_uvs: uv.as_ptr(), indices: indices.as_ptr(),
++                            vertices_length: 4, indices_length: 6, lightmap_group: group,
++                            backface_gi: true, emissive: false, fix_seams: false,
++                            transparent: false, no_shadows: false, alpha_index: -1, alpha_wrap: false, cutoff: 0.5 }); }
++                    }
++                }
++                let revision = unsafe { app_commit_preview_scene(scene) };
++                assert!(revision > 1);
++                let until = Instant::now() + Duration::from_secs(20);
++                while app_preview_scene_revision() != revision {
++                    assert!(Instant::now() < until, "Scene refresh did not complete");
++                    std::thread::sleep(Duration::from_millis(10));
++                }
++                view.revision += 1; assert!(app_update_preview_view(view));
++                let image = read(view);
++                if populated {
++                    let left = 4*(12*48+12); let right = 4*(12*48+36);
++                    assert!(image[left] > 1.9 && image[left+1] < 0.001, "Added red object missing");
++                    assert!(image[right] < 0.001 && image[right+1] > 2.9, "Added green object missing");
++                } else {
++                    assert!(image.chunks_exact(4).all(|p| p[0] < 0.001 && p[1] < 0.001), "Deleted objects remain visible");
++                }
++            }
++
++            // Reorder both meshes and atlases without uploading their pixels or
++            // vertices. The ray-traced image must be exactly unchanged.
++            use crate::preview_scene::*;
++            let settings = LightmapSettings { width: 4, height: 4, dilate: false,
++                denoise: false, fix_seams: false, discard: false };
++            let commit = |scene| {
++                let revision = unsafe { app_commit_preview_scene(scene) };
++                assert!(revision > 1, "Cached scene was rejected");
++                let until = Instant::now() + Duration::from_secs(20);
++                while app_preview_scene_revision() != revision {
++                    assert!(Instant::now() < until, "Cached scene refresh timed out");
++                    std::thread::sleep(Duration::from_millis(10));
++                }
++            };
++            view.revision += 1; assert!(app_update_preview_view(view));
++            let before = read(view);
++            let scene = app_new_preview_scene(CoordinateSystem::Default);
++            for (new, old) in [1,0].into_iter().enumerate() { unsafe {
++                preview_scene_reuse_group(scene, old, settings.clone());
++                preview_scene_reuse_mesh(scene, old, new as u32, -1);
++            } }
++            commit(scene);
++            view.revision += 1; assert!(app_update_preview_view(view));
++            assert_eq!(read(view), before, "Cached and fresh scene pixels differ");
++
++            // Queue emission and transform changes immediately before reuse.
++            // They must be applied to the old resources before those are moved.
++            let blue: Vec<u8> = (0..16).flat_map(|_| texture2d::encode_r11g11b10(0.,0.,4.)).collect();
++            assert!(unsafe { app_update_preview_emission(0, blue.as_ptr(), 64) });
++            moved.mesh_id = 1;
++            moved.position_rows = [[1.,0.,0.,100.],[0.,1.,0.,0.],[0.,0.,1.,0.]];
++            moved.normal_rows = [[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]];
++            moved.flip_winding = 0;
++            assert!(unsafe { crate::preview_geometry::app_update_preview_transforms(&moved, 1) });
++            let scene = app_new_preview_scene(CoordinateSystem::Default);
++            for group in 0..2 { unsafe {
++                preview_scene_reuse_group(scene, group, settings.clone());
++                preview_scene_reuse_mesh(scene, group, group, -1);
++            } }
++            commit(scene);
++            view.revision += 1; assert!(app_update_preview_view(view));
++            let image = read(view);
++            let left = 4*(12*48+12); let right = 4*(12*48+36);
++            assert!(image[left] < 0.001 && image[right+2] > 3.9, "Cached scene lost a queued pose or emission update");
++            moved.position_rows[0][3] = 0.;
++            assert!(unsafe { crate::preview_geometry::app_update_preview_transforms(&moved, 1) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            assert!(read(view)[left] > 1.9, "Cached mesh lost its original transform basis");
++
++            // Remove one cached group and compact the survivor's IDs.
++            let scene = app_new_preview_scene(CoordinateSystem::Default);
++            unsafe {
++                preview_scene_reuse_group(scene, 1, settings);
++                preview_scene_reuse_mesh(scene, 1, 0, -1);
++            }
++            commit(scene);
++            view.revision += 1; assert!(app_update_preview_view(view));
++            let image = read(view);
++            assert!(image[left] > 1.9 && image[right+2] < 0.001, "Removing a group broke cached ID compaction");
++            assert!(unsafe { app_update_preview_emission(0, blue.as_ptr(), 64) });
++            view.revision += 1; assert!(app_update_preview_view(view));
++            assert!(read(view)[left+2] > 3.9, "Live emission stopped after a cached refresh");
++        }));
++        app_request_cancel(); renderer.join().unwrap(); result.unwrap();
++    }
++}
+diff --git a/src/preview_geometry.rs b/src/preview_geometry.rs
+new file mode 100644
+index 0000000..a584a91
+--- /dev/null
++++ b/src/preview_geometry.rs
+@@ -0,0 +1,260 @@
++use std::{collections::BTreeMap, sync::Mutex};
++use ash::{vk, vk::Handle};
++use crate::{*, mesh::{Vertex, encode_normal_octahedron, AccelerationStructureType}, math::Vector2};
++
++/// Row-major matrices, already converted to the native coordinate system.
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct TransformState {
++    pub mesh_id: u32,
++    pub position_rows: [[f32; 4]; 3],
++    pub normal_rows: [[f32; 4]; 3],
++    pub flip_winding: u32,
++}
++
++impl TransformState {
++    fn valid(&self) -> bool {
++        self.flip_winding <= 1 && self.position_rows.iter().chain(self.normal_rows.iter())
++            .flatten().all(|v| v.is_finite())
++    }
++}
++
++pub struct MeshChunk {
++    pub bucket: usize,
++    pub vertex_start: usize,
++    pub index_start: usize,
++    pub index_count: usize,
++    pub original_vertices: Vec<Vertex>,
++    pub flipped: bool,
++}
++
++#[derive(Default)]
++struct Updates {
++    active: bool,
++    mesh_count: usize,
++    pending: BTreeMap<u32, TransformState>,
++}
++
++impl Updates {
++    fn publish(&mut self, states: &[TransformState]) -> bool {
++        if !self.active || states.iter().any(|s| !s.valid() || s.mesh_id as usize >= self.mesh_count) { return false; }
++        for state in states { self.pending.insert(state.mesh_id, *state); }
++        true
++    }
++}
++
++static UPDATES: Mutex<Updates> = Mutex::new(Updates { active: false, mesh_count: 0, pending: BTreeMap::new() });
++
++pub fn reset(active: bool) {
++    *UPDATES.lock().unwrap_or_else(|e| e.into_inner()) = Updates { active, ..Default::default() };
++}
++
++pub fn set_mesh_count(count: usize) {
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).mesh_count = count;
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_update_preview_transforms(states: *const TransformState, count: u32) -> bool {
++    if states.is_null() && count != 0 { return false; }
++    let mut updates = UPDATES.lock().unwrap_or_else(|e| e.into_inner());
++    if count as usize > updates.mesh_count { return false; }
++    let states = if count == 0 { &[] } else { unsafe { std::slice::from_raw_parts(states, count as usize) } };
++    updates.publish(states)
++}
++
++fn transform(rows: &[[f32; 4]; 3], point: Vector3, w: f32) -> Vector3 {
++    let dot = |r: &[f32; 4]| r[0] * point.x + r[1] * point.y + r[2] * point.z + r[3] * w;
++    Vector3::new(dot(&rows[0]), dot(&rows[1]), dot(&rows[2]))
++}
++
++fn decode_normal(p: Vector2) -> Vector3 {
++    let mut n = Vector3::new(p.x, p.y, 1.0 - p.x.abs() - p.y.abs());
++    let t = (-n.z).clamp(0.0, 1.0);
++    n.x += if n.x >= 0.0 { -t } else { t };
++    n.y += if n.y >= 0.0 { -t } else { t };
++    n.normalize()
++}
++
++// Always apply the latest absolute delta to the initial export, never to an
++// already-transformed vertex. Undo and repeated moves cannot accumulate drift.
++fn apply_chunk(mesh: &mut Mesh, chunk: &mut MeshChunk, state: &TransformState) -> bool {
++    for (dst, original) in mesh.vertices[chunk.vertex_start..chunk.vertex_start + chunk.original_vertices.len()]
++        .iter_mut().zip(&chunk.original_vertices) {
++        dst.position = transform(&state.position_rows, original.position, 1.0);
++        dst.normal_octahedron = encode_normal_octahedron(transform(&state.normal_rows, decode_normal(original.normal_octahedron), 0.0).normalize());
++    }
++    let flip = state.flip_winding != 0;
++    let winding_changed = chunk.flipped != flip;
++    if winding_changed {
++        for i in (chunk.index_start..chunk.index_start + chunk.index_count).step_by(3) {
++            mesh.indices.swap(i, i + 1);
++            mesh.main_uvs.swap(i, i + 1); // Alpha UVs follow the same corner permutation.
++        }
++        chunk.flipped = flip;
++    }
++    winding_changed
++}
++
++fn bytes<T>(values: &[T]) -> &[u8] {
++    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
++}
++
++fn upload_bvh_buffer(vk: &VulkanContext, buffer: &mut Buffer, data: &[u8], name: &str) -> bool {
++    let grew = data.len() as u64 > buffer.bytes;
++    if grew {
++        buffer.destroy(vk);
++        *buffer = Buffer::empty(vk, name.into(), data.len().next_power_of_two() as u64,
++            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
++            vk::MemoryPropertyFlags::DEVICE_LOCAL);
++    }
++    vk.upload_buffer(data, buffer.buffer);
++    grew
++}
++
++pub(crate) fn refresh_shaders(app: &mut Glim, recompile: bool) {
++    if app.render_target.visibility.image().is_null() { return; }
++    let bindings = ShaderBindings {
++        tlas: app.tlas.acceleration_structure,
++        albedos: &app.albedo_array.views(), emissions: &app.emission_array.views(),
++        cookies: &app.cookie_array.views(), alphas: &app.alphas_array.views(),
++        skybox: app.skybox.view(), skybox_sampler: app.skybox.sampler(),
++        visibility: app.render_target.visibility.view(), preview_diffuse: app.render_target.diffuse.view(),
++        linear_sampler: app.linear_sampler,
++    };
++    for (shader, name, size) in [
++        (&mut app.init_from_camera_shader, ShaderName::InitializePreview, size_of::<InitializePreviewPushConstants>()),
++        (&mut app.preview_shader, ShaderName::Preview, size_of::<PreviewPushConstants>()),
++        (&mut app.preview_surface_shader, ShaderName::PreviewSurface, size_of::<preview_denoise::SurfacePush>()),
++    ] {
++        if shader.pipeline.is_null() { continue; }
++        if recompile {
++            shader.destroy(&app.vk);
++            *shader = load_compute_shader(&app.vk, name, &app.constants, &bindings, size);
++        }
++        update_compute_shader(&app.vk, shader, &bindings);
++    }
++}
++
++pub fn apply_updates(app: &mut Glim) {
++    let states = std::mem::take(&mut UPDATES.lock().unwrap_or_else(|e| e.into_inner()).pending);
++    if states.is_empty() { return; }
++    let mut changed = [false; mesh::GEOMETRIES_VARIANTS];
++    let mut winding_changed = false;
++    for (id, state) in states {
++        let Some(chunk) = app.preview_meshes.get_mut(id as usize) else { continue; };
++        winding_changed |= apply_chunk(&mut app.meshes[chunk.bucket], chunk, &state);
++        changed[chunk.bucket] = true;
++    }
++    if !changed.iter().any(|v| *v) { return; }
++    unsafe { app.vk.device.device_wait_idle().unwrap(); }
++    let mut merged = app.meshes[0].clone();
++    for mesh in &app.meshes[1..] { merged.merge_mesh(mesh); }
++
++    // Topology and buffer addresses stay stable. UV packing and all captured
++    // material textures remain resident; no scene/material re-export is needed.
++    app.vk.upload_buffer(bytes(&merged.vertices), app.gpu_mesh.vertex_buffer.buffer);
++    if winding_changed {
++        app.vk.upload_buffer(bytes(&merged.indices), app.gpu_mesh.index_buffer.buffer);
++        app.vk.upload_buffer(bytes(&merged.main_uvs), app.gpu_mesh.main_uv_buffer.buffer);
++    }
++    let cmd = app.vk.begin_single_use_cmd();
++    let barrier = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
++        .dst_access_mask(vk::AccessFlags::MEMORY_READ);
++    unsafe { app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER,
++        vk::PipelineStageFlags::ALL_COMMANDS, vk::DependencyFlags::empty(), &[barrier], &[], &[]); }
++    app.vk.end_single_use_cmd(cmd);
++
++    let mut recompile = false;
++    match &mut app.gpu_mesh.acceleration_structure {
++        AccelerationStructureType::RayQuery(blases) => {
++            app.tlas.destroy(&app.vk);
++            for partition in 0..2 {
++                let begin = partition * 2;
++                if !changed[begin] && !changed[begin + 1] { continue; }
++                blases[partition].destroy(&app.vk);
++                let first_triangle = app.meshes[..begin].iter().map(|m| m.indices.len() / 3).sum::<usize>() as u32;
++                blases[partition] = GpuMesh::create_vulkan_blas(&app.vk, &merged,
++                    &app.meshes[begin..begin + 2], first_triangle,
++                    app.gpu_mesh.vertex_buffer.gpu_address, app.gpu_mesh.index_buffer.gpu_address);
++            }
++            app.tlas = create_tlas(&app.vk, blases);
++        }
++        AccelerationStructureType::BVH { cwbvh } => {
++            let mut triangles = Vec::with_capacity(merged.indices.len());
++            let mut primitive = 0u32;
++            for mesh in &app.meshes {
++                for tri in mesh.indices.chunks_exact(3) {
++                    let p = [tri[0], tri[1], tri[2]].map(|i| mesh.vertices[i as usize].position);
++                    triangles.push([p[0].x, p[0].y, p[0].z, f32::from_bits(primitive)]);
++                    triangles.push([p[1].x, p[1].y, p[1].z, if mesh.transparent { 1.0 } else { 0.0 }]);
++                    triangles.push([p[2].x, p[2].y, p[2].z, if mesh.no_shadows { 1.0 } else { 0.0 }]);
++                    primitive += 1;
++                }
++            }
++            *cwbvh = cwbvh::Cwbvh::build(&triangles);
++            recompile |= upload_bvh_buffer(&app.vk, &mut app.bvh_nodes, bytes(&cwbvh.nodes), "Preview BVH nodes");
++            recompile |= upload_bvh_buffer(&app.vk, &mut app.bvh_triangles, bytes(&cwbvh.triangles), "Preview BVH triangles");
++            app.constants.bvh_nodes_address = app.bvh_nodes.gpu_address;
++            app.constants.bvh_triangles_address = app.bvh_triangles.gpu_address;
++        }
++    }
++    let cmd = app.vk.begin_single_use_cmd();
++    let barrier = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::MEMORY_WRITE)
++        .dst_access_mask(vk::AccessFlags::MEMORY_READ);
++    unsafe { app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
++        vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[barrier], &[], &[]); }
++    app.vk.end_single_use_cmd(cmd);
++    refresh_shaders(app, recompile);
++    app.preview_initialized = false;
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn state() -> TransformState {
++        TransformState { mesh_id: 0, position_rows: [[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]],
++            normal_rows: [[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]], flip_winding: 0 }
++    }
++    #[test]
++    fn transform_mailbox_coalesces_per_object_and_rejects_bad_batches() {
++        assert_eq!(size_of::<TransformState>(), 104);
++        assert_eq!(std::mem::offset_of!(TransformState, normal_rows), 52);
++        let mut updates = Updates { active: true, mesh_count: 2, ..Default::default() };
++        let a = state(); let mut b = state(); b.mesh_id = 1;
++        assert!(updates.publish(&[a,b]));
++        let mut moved = a; moved.position_rows[0][3] = 8.;
++        assert!(updates.publish(&[moved]));
++        assert_eq!(updates.pending.len(), 2);
++        assert_eq!(updates.pending[&0].position_rows[0][3], 8.);
++        let mut invalid = a; invalid.normal_rows[1][0] = f32::NAN;
++        assert!(!updates.publish(&[a,invalid]));
++        assert_eq!(updates.pending[&0].position_rows[0][3], 8.);
++        invalid = a; invalid.mesh_id = 2; assert!(!updates.publish(&[invalid]));
++        updates.active = false; assert!(!updates.publish(&[a]));
++    }
++    #[test]
++    fn transforms_preserve_uv_flags_normals_and_reverse_mirroring_without_drift() {
++        let vertex = Vertex { position: Vector3::new(1.,2.,3.), normal_octahedron: encode_normal_octahedron(Vector3::new(1.,1.,0.).normalize()),
++            uv: Vector2::new(0.2,0.4), flags: 1, lightmap_group: 2, resolution: 2, pad: 0 };
++        let mut mesh = Mesh { vertices: vec![vertex;3], indices: vec![0,1,2],
++            main_uvs: vec![[0.;4],[1.;4],[2.;4]], transparent: true, no_shadows: false };
++        let mut chunk = MeshChunk { bucket: 0, vertex_start: 0, index_start: 0, index_count: 3,
++            original_vertices: mesh.vertices.clone(), flipped: false };
++        let mut moved = state(); moved.position_rows[0] = [-2.,0.,0.,10.];
++        moved.normal_rows[0][0] = -0.5; moved.flip_winding = 1;
++        for _ in 0..3 {
++            apply_chunk(&mut mesh,&mut chunk,&moved);
++            assert_eq!(mesh.vertices[0].position.x,8.);
++            assert_eq!(mesh.vertices[0].uv.x,vertex.uv.x);
++            assert_eq!(mesh.vertices[0].flags,vertex.flags);
++            let n = decode_normal(mesh.vertices[0].normal_octahedron);
++            assert!((n.y + 2. * n.x).abs() < 1e-5);
++            assert_eq!(mesh.indices,vec![1,0,2]);
++            assert_eq!(mesh.main_uvs[0],[1.;4]);
++        }
++        apply_chunk(&mut mesh,&mut chunk,&state());
++        assert_eq!(mesh.vertices[0].position.x,1.);
++        assert_eq!(mesh.indices,vec![0,1,2]);
++        assert_eq!(mesh.main_uvs[0],[0.;4]);
++    }
++}
+diff --git a/src/preview_scene.rs b/src/preview_scene.rs
+new file mode 100644
+index 0000000..6f405b2
+--- /dev/null
++++ b/src/preview_scene.rs
+@@ -0,0 +1,319 @@
++//! Own a replacement export until the render thread can install it atomically.
++use std::sync::Mutex;
++use ash::vk::Handle;
++use crate::{*, mesh::{FfiMesh, Mesh, Vertex}, preview_geometry::MeshChunk};
++
++pub struct Scene {
++    system: CoordinateSystem,
++    base_revision: u64,
++    meshes: [Mesh; 4],
++    chunks: Vec<MeshChunk>,
++    mesh_order: Vec<MeshReference>,
++    groups: Vec<LightmapGroup>,
++    group_reuse: Vec<Option<usize>>,
++    lights: Vec<Light>,
++    cookies: Vec<TexturePixelsData>,
++    alphas: Vec<TexturePixelsData>,
++}
++
++enum MeshReference {
++    Uploaded(usize),
++    Reused { mesh: usize, group: u32, alpha: i32 },
++}
++
++impl Scene {
++    fn new(system: CoordinateSystem) -> Self {
++        Self { system, base_revision: 0, meshes: std::array::from_fn(|i| Mesh {
++            vertices: vec![], indices: vec![], main_uvs: vec![],
++            transparent: i % 2 != 0, no_shadows: i >= 2,
++        }), chunks: vec![], mesh_order: vec![], groups: vec![], group_reuse: vec![],
++            lights: vec![], cookies: vec![], alphas: vec![] }
++    }
++
++    fn valid(&self) -> bool {
++        self.groups.len() <= 256 && self.group_reuse.len() == self.groups.len() &&
++        self.groups.iter().zip(&self.group_reuse).all(|(g, reuse)| g.settings.width > 0 && g.settings.height > 0 &&
++            (reuse.is_some() || (g.albedo_pixels.len() == g.settings.width as usize * g.settings.height as usize * 4 &&
++            g.emission_pixels.len() == g.albedo_pixels.len()))) &&
++        self.meshes.iter().all(|m| m.vertices.iter().all(|v| v.group() < self.groups.len() as u32))
++    }
++
++    fn valid_reuse(&self, mailbox: &Mailbox) -> bool {
++        if self.base_revision != mailbox.applied { return false; }
++        let mut used = std::collections::HashSet::new();
++        self.groups.iter().zip(&self.group_reuse).all(|(group, old)| match old {
++            None => true,
++            Some(index) => used.insert(*index) && mailbox.group_sizes.get(*index) ==
++                Some(&(group.settings.width, group.settings.height)),
++        }) && self.mesh_order.iter().all(|entry| match entry {
++            MeshReference::Uploaded(index) => *index < self.chunks.len(),
++            MeshReference::Reused { mesh, group, alpha } => *mesh < mailbox.mesh_count &&
++                (*group as usize) < self.groups.len() && (*alpha == -1 ||
++                    (*alpha >= 0 && (*alpha as usize) < self.alphas.len() && *alpha < 0xffff)),
++        })
++    }
++}
++
++struct Mailbox { active: bool, next: u64, applied: u64, pending: Option<(u64, Box<Scene>)>,
++    mesh_count: usize, group_sizes: Vec<(u32, u32)> }
++static MAILBOX: Mutex<Mailbox> = Mutex::new(Mailbox { active: false, next: 2, applied: 0, pending: None,
++    mesh_count: 0, group_sizes: vec![] });
++
++pub fn reset(active: bool) {
++    *MAILBOX.lock().unwrap_or_else(|e| e.into_inner()) = Mailbox { active, next: 2, applied: 0, pending: None,
++        mesh_count: 0, group_sizes: vec![] };
++}
++fn mark_ready(app: &Glim, revision: u64) {
++    let mut mailbox = MAILBOX.lock().unwrap_or_else(|e| e.into_inner());
++    mailbox.mesh_count = app.preview_meshes.len();
++    mailbox.group_sizes = app.groups.iter().map(|g| (g.settings.width, g.settings.height)).collect();
++    mailbox.applied = revision;
++}
++pub fn mark_initial_ready(app: &Glim) { mark_ready(app, 1); }
++
++#[unsafe(no_mangle)]
++pub extern "C" fn app_preview_scene_revision() -> u64 {
++    MAILBOX.lock().unwrap_or_else(|e| e.into_inner()).applied
++}
++#[unsafe(no_mangle)]
++pub extern "C" fn app_new_preview_scene(system: CoordinateSystem) -> *mut Scene {
++    let mut scene = Scene::new(system);
++    scene.base_revision = app_preview_scene_revision();
++    Box::into_raw(Box::new(scene))
++}
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_destroy_preview_scene(scene: *mut Scene) {
++    if !scene.is_null() { drop(unsafe { Box::from_raw(scene) }); }
++}
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn preview_scene_add_mesh(scene: *mut Scene, mesh: FfiMesh) {
++    let scene = unsafe { &mut *scene };
++    let bucket = mesh.transparent as usize + 2 * mesh.no_shadows as usize;
++    let target = &mut scene.meshes[bucket];
++    let vertex_start = target.vertices.len();
++    let index_start = target.indices.len();
++    let emissive = mesh.emissive;
++    Mesh::append_ffi_mesh(target, mesh, scene.system, &scene.groups, false, emissive);
++    scene.chunks.push(MeshChunk { bucket, vertex_start, index_start,
++        index_count: target.indices.len() - index_start,
++        original_vertices: target.vertices[vertex_start..].to_vec(), flipped: false });
++    scene.mesh_order.push(MeshReference::Uploaded(scene.chunks.len() - 1));
++}
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn preview_scene_reuse_mesh(scene: *mut Scene, mesh: u32, group: u32, alpha: i32) {
++    unsafe { &mut *scene }.mesh_order.push(MeshReference::Reused { mesh: mesh as usize, group, alpha });
++}
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn preview_scene_add_light(scene: *mut Scene, mut light: Light) {
++    let scene = unsafe { &mut *scene };
++    light.convert_coordinate_system(scene.system);
++    light.shadow_radius_or_angle = light.shadow_radius_or_angle.max(0.0);
++    scene.lights.push(light);
++}
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn preview_scene_add_group(scene: *mut Scene, settings: LightmapSettings,
++    albedo: *const u8, albedo_length: u32, emission: *const u8, emission_length: u32) {
++    let scene = unsafe { &mut *scene };
++    scene.groups.push(LightmapGroup::new(settings,
++        unsafe { std::slice::from_raw_parts(albedo, albedo_length as usize) },
++        unsafe { std::slice::from_raw_parts(emission, emission_length as usize) }));
++    scene.group_reuse.push(None);
++}
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn preview_scene_reuse_group(scene: *mut Scene, old_group: u32, settings: LightmapSettings) {
++    let scene = unsafe { &mut *scene };
++    scene.groups.push(LightmapGroup::new(settings, &[], &[]));
++    scene.group_reuse.push(Some(old_group as usize));
++}
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn preview_scene_add_texture(scene: *mut Scene, alpha: bool,
++    pixels: *const u8, length: u32, width: u32, height: u32) {
++    let scene = unsafe { &mut *scene };
++    let data = TexturePixelsData { pixels: unsafe { std::slice::from_raw_parts(pixels, length as usize) }.to_vec(), width, height };
++    if alpha { scene.alphas.push(data); } else { scene.cookies.push(data); }
++}
++// Always consumes ownership, including rejection. The old GPU scene stays live
++// while Unity exports; only this bounded mailbox crosses into the render thread.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_commit_preview_scene(scene: *mut Scene) -> u64 {
++    if scene.is_null() { return 0; }
++    let scene = unsafe { Box::from_raw(scene) };
++    let mut mailbox = MAILBOX.lock().unwrap_or_else(|e| e.into_inner());
++    if !mailbox.active || mailbox.next != mailbox.applied + 1 || mailbox.pending.is_some() ||
++        !scene.valid() || !scene.valid_reuse(&mailbox) { return 0; }
++    let revision = mailbox.next;
++    mailbox.next += 1;
++    mailbox.pending = Some((revision, scene));
++    revision
++}
++
++pub fn ensure_nonempty(app: &mut Glim) {
++    if app.groups.is_empty() {
++        app.groups.push(LightmapGroup::new(LightmapSettings { width: 1, height: 1,
++            dilate: false, denoise: false, fix_seams: false, discard: false }, &[0;4], &[0;4]));
++    }
++    if app.meshes.iter().all(|m| m.indices.is_empty()) {
++        // A zero-area triangle is never hit, but keeps buffer/BVH APIs valid even
++        // after the last renderer is deleted. It has no exported object ID.
++        app.meshes[0].vertices = vec![Vertex { position: Vector3::ZERO, flags: 0, lightmap_group: 0, resolution: 0, pad: 0,
++            normal_octahedron: Vector2::ZERO, uv: Vector2::ZERO }; 3];
++        app.meshes[0].indices = vec![0,1,2];
++        app.meshes[0].main_uvs = vec![[0.;4];3];
++    }
++}
++
++fn release_scene(app: &mut Glim) {
++    // Pipelines hold descriptors into the old textures and acceleration structures.
++    app.tlas.destroy(&app.vk);
++    app.gpu_mesh.destroy(&app.vk);
++    app.gpu_mesh = GpuMesh::null();
++    for buffer in [&mut app.bvh_nodes, &mut app.bvh_triangles, &mut app.gpu_lights, &mut app.emissive_triangles_buffer] {
++        if !buffer.buffer.is_null() { buffer.destroy(&app.vk); }
++    }
++    // Atlas images survive until prepare_scene transfers the reused slots and
++    // releases the others. Cookies and alpha textures are freshly exported.
++    for array in [&mut app.cookie_array, &mut app.alphas_array] {
++        array.destroy(&app.vk);
++        *array = TextureArray::null();
++    }
++    app.seams.clear();
++    app.emissive_triangles.clear();
++}
++
++fn copy_chunk(source: &Mesh, chunk: &MeshChunk, destination: &mut Mesh,
++    remap: Option<(u32, i32)>) -> MeshChunk {
++    let vertex_start = destination.vertices.len();
++    let index_start = destination.indices.len();
++    let mut vertices = source.vertices[chunk.vertex_start..chunk.vertex_start + chunk.original_vertices.len()].to_vec();
++    let mut original_vertices = chunk.original_vertices.clone();
++    let mut uvs = source.main_uvs[chunk.index_start..chunk.index_start + chunk.index_count].to_vec();
++    if let Some((group, alpha)) = remap {
++        for vertex in vertices.iter_mut().chain(original_vertices.iter_mut()) {
++            vertex.lightmap_group = group as u8;
++        }
++        for uv in &mut uvs { uv[2] = f32::from_bits((uv[2].to_bits() & !0xffff) | (alpha as u32 & 0xffff)); }
++    }
++    destination.vertices.extend(vertices);
++    destination.indices.extend(source.indices[chunk.index_start..chunk.index_start + chunk.index_count]
++        .iter().map(|index| *index - chunk.vertex_start as u32 + vertex_start as u32));
++    destination.main_uvs.extend(uvs);
++    MeshChunk { bucket: chunk.bucket, vertex_start, index_start, index_count: chunk.index_count,
++        original_vertices, flipped: chunk.flipped }
++}
++
++fn resolve_meshes(scene: &Scene, app: &Glim) -> ([Mesh; 4], Vec<MeshChunk>) {
++    let mut meshes = Scene::new(scene.system).meshes;
++    let mut chunks = Vec::with_capacity(scene.mesh_order.len());
++    for entry in &scene.mesh_order {
++        let (source, chunk, remap) = match *entry {
++            MeshReference::Uploaded(index) => {
++                let chunk = &scene.chunks[index];
++                (&scene.meshes[chunk.bucket], chunk, None)
++            },
++            MeshReference::Reused { mesh, group, alpha } => {
++                let chunk = &app.preview_meshes[mesh];
++                (&app.meshes[chunk.bucket], chunk, Some((group, alpha)))
++            },
++        };
++        chunks.push(copy_chunk(source, chunk, &mut meshes[chunk.bucket], remap));
++    }
++    (meshes, chunks)
++}
++
++pub fn apply_updates(app: &mut Glim) {
++    let pending = MAILBOX.lock().unwrap_or_else(|e| e.into_inner()).pending.take();
++    let Some((revision, scene)) = pending else { return; };
++    unsafe { app.vk.device.device_wait_idle().unwrap(); }
++    let (meshes, chunks) = resolve_meshes(&scene, app);
++    let reused_meshes = scene.mesh_order.iter().filter(|e| matches!(e, MeshReference::Reused { .. })).count();
++    let reused_groups = scene.group_reuse.iter().filter(|g| g.is_some()).count();
++    #[cfg(test)]
++    let reused_images: Vec<_> = scene.group_reuse.iter().enumerate().filter_map(|(new, old)| old.map(|old|
++        (new, app.albedo_array.textures[old].image, app.emission_array.textures[old].image))).collect();
++    // Old mesh IDs, cookie indices and atlas IDs must not reach the new export.
++    preview_geometry::reset(true);
++    preview_updates::reset(true);
++    release_scene(app);
++    let Scene { groups, group_reuse, lights, cookies, alphas, .. } = *scene;
++    app.meshes = meshes;
++    app.preview_meshes = chunks;
++    app.groups = groups;
++    app.preview_reuse_groups = group_reuse;
++    app.cpu_lights = lights;
++    app.light_cookies = cookies;
++    app.alphas = alphas;
++    prepare_scene(app);
++    #[cfg(test)]
++    for (group, albedo, emission) in reused_images {
++        assert_eq!(app.albedo_array.textures[group].image, albedo, "Reused albedo was reallocated");
++        assert_eq!(app.emission_array.textures[group].image, emission, "Reused emission was reallocated");
++    }
++    preview_geometry::set_mesh_count(app.preview_meshes.len());
++    preview_geometry::refresh_shaders(app, true);
++    app.preview_push_constants.lights_address = app.gpu_lights.gpu_address;
++    app.preview_push_constants.lights_count = app.cpu_lights.len() as u32;
++    app.preview_initialized = false;
++    Log::msg(&format!("Preview refresh: reused {reused_groups} material atlases and {reused_meshes} meshes"));
++    mark_ready(app, revision);
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn preview_scene_validates_atlas_sizes_and_allows_empty_scene() {
++        let mut scene = Scene::new(CoordinateSystem::Unity);
++        assert!(scene.valid());
++        scene.groups.push(LightmapGroup::new(LightmapSettings { width: 2, height: 2,
++            dilate: false, denoise: false, fix_seams: false, discard: false }, &[0;4], &[0;4]));
++        scene.group_reuse.push(None);
++        assert!(!scene.valid());
++    }
++
++    #[test]
++    fn preview_reuse_remaps_groups_alpha_and_indices_preserving_current_and_original_pose() {
++        let mut source = Scene::new(CoordinateSystem::Default).meshes[0].clone();
++        let original = Vertex { position: Vector3::new(1.,2.,3.), flags: Vertex::EMISSIVE_BIT, lightmap_group: 7, resolution: 2, pad: 0,
++            normal_octahedron: Vector2::ZERO, uv: Vector2::new(0.2,0.7) };
++        let mut current = original.clone(); current.position.x = 10.;
++        source.vertices = vec![original.clone(), current.clone(), current.clone(), current.clone()];
++        source.indices = vec![0,0,0,1,3,2];
++        source.main_uvs = vec![[0.1,0.9,f32::from_bits(3 | (1 << 16)),0.4];6];
++        let chunk = MeshChunk { bucket: 0, vertex_start: 1, index_start: 3, index_count: 3,
++            original_vertices: vec![original;3], flipped: true };
++        let mut destination = Scene::new(CoordinateSystem::Default).meshes[0].clone();
++        destination.vertices.push(current);
++        let copied = copy_chunk(&source, &chunk, &mut destination, Some((2,-1)));
++        assert_eq!(destination.indices, [1,3,2]);
++        assert_eq!(destination.vertices[1].position.x, 10.);
++        assert_eq!(copied.original_vertices[0].position.x, 1.);
++        assert_eq!(destination.vertices[1].flags, Vertex::EMISSIVE_BIT);
++        assert_eq!(copied.original_vertices[0].flags, Vertex::EMISSIVE_BIT);
++        assert_eq!((destination.vertices[1].uv.x, destination.vertices[1].uv.y), (0.2,0.7));
++        assert!(copied.flipped);
++        assert_eq!(destination.vertices[1].group(), 2);
++        assert_eq!(copied.original_vertices[0].group(), 2);
++        assert_eq!(destination.main_uvs[0][2].to_bits(), 0xffff | (1 << 16));
++        assert_eq!(destination.main_uvs[0][3], 0.4);
++    }
++
++    #[test]
++    fn preview_reuse_rejects_duplicate_atlases_stale_revision_and_bad_mesh_ids() {
++        let mut scene = Scene::new(CoordinateSystem::Default);
++        scene.base_revision = 3;
++        let mailbox = Mailbox { active: true, applied: 3, next: 4, pending: None,
++            mesh_count: 1, group_sizes: vec![(4,4)] };
++        let settings = LightmapSettings { width: 4, height: 4, dilate: false,
++            denoise: false, fix_seams: false, discard: false };
++        scene.groups.push(LightmapGroup::new(settings.clone(), &[], &[]));
++        scene.group_reuse.push(Some(0));
++        scene.mesh_order.push(MeshReference::Reused { mesh: 0, group: 0, alpha: -1 });
++        assert!(scene.valid() && scene.valid_reuse(&mailbox));
++        scene.base_revision = 2; assert!(!scene.valid_reuse(&mailbox));
++        scene.base_revision = 3;
++        scene.mesh_order.push(MeshReference::Reused { mesh: 1, group: 0, alpha: -1 });
++        assert!(!scene.valid_reuse(&mailbox)); scene.mesh_order.pop();
++        scene.groups.push(LightmapGroup::new(settings, &[], &[]));
++        scene.group_reuse.push(Some(0)); assert!(!scene.valid_reuse(&mailbox));
++    }
++}
+diff --git a/src/preview_updates.rs b/src/preview_updates.rs
+new file mode 100644
+index 0000000..d6648dc
+--- /dev/null
++++ b/src/preview_updates.rs
+@@ -0,0 +1,299 @@
++use std::sync::Mutex;
++use crate::{bindings::CoordinateSystem, lights::Light, math::{Vector2, Vector3}};
++
++// Plain C layout shared with Bindings.PreviewLightState. Vectors are in the
++// exporting application's coordinate system, just like app_add_light inputs.
++#[repr(C)]
++#[derive(Clone, Copy, Debug)]
++pub struct PreviewLightState {
++    pub color: Vector3,
++    pub position: Vector3,
++    pub direction: Vector3,
++    pub up: Vector3,
++    pub range: f32,
++    pub spot_inner_percent: f32,
++    pub spot_outer: f32,
++    pub area_size: Vector2,
++    pub ty: u32,
++    pub cast_shadows: u32,
++    pub mixed: u32,
++    pub cookie: u32,
++    pub shadow_radius_or_angle: f32,
++}
++
++impl PreviewLightState {
++    fn is_valid(&self) -> bool {
++        [self.color, self.position, self.direction, self.up].iter().all(|v|
++            v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) &&
++            self.range.is_finite() && self.range >= 0.0 &&
++            self.spot_inner_percent.is_finite() && (0.0..=100.0).contains(&self.spot_inner_percent) &&
++            self.spot_outer.is_finite() && (0.0..=180.0).contains(&self.spot_outer) &&
++            self.area_size.x.is_finite() && self.area_size.x >= 0.0 &&
++            self.area_size.y.is_finite() && self.area_size.y >= 0.0 &&
++            self.ty <= 4 && self.cast_shadows <= 1 && self.mixed <= 1 &&
++            self.shadow_radius_or_angle.is_finite() && self.shadow_radius_or_angle >= 0.0
++    }
++}
++
++// Unity publishes snapshots; only the renderer thread touches Glim or Vulkan.
++#[derive(Default)]
++struct Updates {
++    active: bool,
++    pending: Option<Vec<PreviewLightState>>,
++    pending_indirect: Option<f32>,
++}
++
++impl Updates {
++    fn reset(&mut self, active: bool) {
++        self.active = active;
++        self.pending = None;
++        self.pending_indirect = None;
++    }
++
++    fn publish_indirect(&mut self, multiplier: f32) -> bool {
++        if !self.active || !multiplier.is_finite() || multiplier < 0.0 {
++            return false;
++        }
++        self.pending_indirect = Some(multiplier);
++        true
++    }
++
++    fn publish(&mut self, states: &[PreviewLightState]) -> bool {
++        if !self.active || states.iter().any(|s| !s.is_valid()) {
++            return false;
++        }
++        self.pending = Some(states.to_vec());
++        true
++    }
++}
++
++static UPDATES: Mutex<Updates> = Mutex::new(Updates { active: false, pending: None, pending_indirect: None });
++
++pub fn reset(active: bool) {
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).reset(active);
++}
++
++pub fn take() -> Option<Vec<PreviewLightState>> {
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).pending.take()
++}
++
++pub fn take_indirect() -> Option<f32> {
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).pending_indirect.take()
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn app_update_preview_indirect_multiplier(multiplier: f32) -> bool {
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).publish_indirect(multiplier)
++}
++
++// A snapshot replaces the entire list, so changing order, deleting the last
++// light, and Undo/Redo cannot leave stale light slots or inherit another cookie.
++pub fn apply(lights: &mut Vec<Light>, states: &[PreviewLightState], system: CoordinateSystem, cookie_count: usize) -> bool {
++    if states.iter().any(|s| !s.is_valid() || (s.cookie != u32::MAX && s.cookie as usize >= cookie_count)) {
++        return false;
++    }
++    lights.clear();
++    for state in states {
++        let mut light = Light {
++            color: state.color,
++            position: state.position,
++            direction: state.direction,
++            up: state.up,
++            range: state.range,
++            spot_inner_percent: state.spot_inner_percent,
++            spot_outer: state.spot_outer,
++            area_or_cookie_size: state.area_size,
++            ty: match state.ty {
++                0 => crate::lights::LightType::Directional,
++                1 => crate::lights::LightType::Point,
++                2 => crate::lights::LightType::Spot,
++                3 => crate::lights::LightType::Area,
++                4 => crate::lights::LightType::Disc,
++                _ => unreachable!(),
++            },
++            cast_shadows: state.cast_shadows != 0,
++            mixed: state.mixed != 0,
++            cookie: state.cookie,
++            shadow_radius_or_angle: state.shadow_radius_or_angle.max(0.0),
++            ..Default::default()
++        };
++        light.convert_coordinate_system(system);
++        lights.push(light);
++    }
++    true
++}
++
++/// The input is copied before returning. No app pointer crosses threads.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_update_preview_lights(states: *const PreviewLightState, count: u32) -> bool {
++    if states.is_null() && count != 0 {
++        return false;
++    }
++    let states = if count == 0 { &[] } else {
++        unsafe { std::slice::from_raw_parts(states, count as usize) }
++    };
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).publish(states)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::lights::LightType;
++
++    fn state() -> PreviewLightState {
++        PreviewLightState {
++            color: Vector3::ONE, position: Vector3::new(1.0, 2.0, 3.0),
++            direction: Vector3::new(0.0, 1.0, 0.0), up: Vector3::new(0.0, 0.0, 1.0),
++            range: 9.0, spot_inner_percent: 80.0, spot_outer: 40.0,
++            area_size: Vector2::new(2.0, 3.0), ty: 2, cast_shadows: 1,
++            mixed: 0, cookie: u32::MAX, shadow_radius_or_angle: 0.0,
++        }
++    }
++
++    #[test]
++    fn add_delete_last_and_restore_from_empty() {
++        let mut lights = Vec::new();
++        assert!(apply(&mut lights, &[], CoordinateSystem::Unity, 0));
++        assert!(apply(&mut lights, &[state()], CoordinateSystem::Unity, 0));
++        assert_eq!(lights.len(), 1);
++        let mut area = state();
++        area.ty = 3;
++        area.position.x = 20.0;
++        assert!(apply(&mut lights, &[state(), area], CoordinateSystem::Unity, 0));
++        assert_eq!(lights.len(), 2);
++        assert_eq!(lights[1].ty, LightType::Area);
++        assert!(apply(&mut lights, &[area], CoordinateSystem::Unity, 0));
++        assert_eq!(lights.len(), 1);
++        assert_eq!(lights[0].position.x, 20.0);
++        assert!(apply(&mut lights, &[], CoordinateSystem::Unity, 0));
++        assert!(lights.is_empty());
++        assert!(apply(&mut lights, &[state(), area], CoordinateSystem::Unity, 0));
++        assert_eq!(lights.len(), 2);
++    }
++
++    #[test]
++    fn complete_snapshots_preserve_settings_across_reordering() {
++        let mut lights = Vec::new();
++        let mut spot = state();
++        spot.cookie = 0;
++        spot.mixed = 1;
++        let mut disc = state();
++        disc.ty = 4;
++        disc.cookie = 1;
++        disc.cast_shadows = 0;
++        disc.area_size = Vector2::new(4.0, 4.0);
++        for states in [[spot, disc], [disc, spot]] {
++            assert!(apply(&mut lights, &states, CoordinateSystem::Unity, 2));
++            for (light, expected) in lights.iter().zip(states) {
++                assert_eq!(light.cookie, expected.cookie);
++                assert_eq!(light.cast_shadows, expected.cast_shadows != 0);
++                assert_eq!(light.mixed, expected.mixed != 0);
++                assert_eq!(light.spot_outer, expected.spot_outer);
++                assert_eq!(light.area_or_cookie_size.x, expected.area_size.x);
++            }
++        }
++    }
++
++    #[test]
++    fn mailbox_coalesces_add_delete_and_clears_on_close() {
++        let mut updates = Updates::default();
++        assert!(!updates.publish(&[]));
++        updates.reset(true);
++        let mut snapshot = state();
++        assert!(updates.publish(&[snapshot]));
++        snapshot.position.x = 100.0;
++        assert_ne!(updates.pending.as_ref().unwrap()[0].position.x, snapshot.position.x);
++        assert!(updates.publish(&[]));
++        assert!(updates.pending.as_ref().unwrap().is_empty());
++        updates.reset(false);
++        assert!(updates.pending.is_none());
++        updates.reset(true);
++        assert!(updates.pending.is_none());
++    }
++
++    #[test]
++    fn repeated_snapshots_do_not_accumulate_coordinate_conversion() {
++        let mut lights = Vec::new();
++        for _ in 0..2 {
++            apply(&mut lights, &[state()], CoordinateSystem::Unity, 0);
++            assert_eq!(lights[0].position.z, -3.0);
++            assert_eq!(lights[0].direction.y, -1.0);
++            assert_eq!(lights[0].up.z, -1.0);
++            assert_eq!(lights[0].range, 9.0);
++            assert_eq!(lights[0].shadow_radius_or_angle, 0.0);
++        }
++        apply(&mut lights, &[state()], CoordinateSystem::Default, 0);
++        assert_eq!(lights[0].position.z, 3.0);
++    }
++
++    #[test]
++    fn invalid_snapshot_leaves_previous_list_intact() {
++        let mut lights = Vec::new();
++        apply(&mut lights, &[state()], CoordinateSystem::Unity, 0);
++        for field in 0..9 {
++            let mut invalid = state();
++            match field {
++                0 => invalid.ty = 5,
++                1 => invalid.cast_shadows = 2,
++                2 => invalid.cookie = 0,
++                3 => invalid.range = -1.0,
++                4 => invalid.position.x = f32::NAN,
++                5 => invalid.spot_inner_percent = 101.0,
++                6 => invalid.spot_outer = 181.0,
++                7 => invalid.area_size.y = f32::INFINITY,
++                _ => invalid.shadow_radius_or_angle = f32::NAN,
++            }
++            assert!(!apply(&mut lights, &[state(), invalid], CoordinateSystem::Unity, 0));
++            assert_eq!(lights.len(), 1);
++            assert_eq!(lights[0].position.z, -3.0);
++        }
++    }
++
++    #[test]
++    fn zero_intensity_and_shape_changes_survive_replacement() {
++        let mut lights = Vec::new();
++        let mut updated = state();
++        updated.color = Vector3::ZERO;
++        updated.spot_outer = 65.0;
++        updated.spot_inner_percent = 50.0;
++        updated.area_size = Vector2::new(5.0, 6.0);
++        apply(&mut lights, &[updated], CoordinateSystem::Unity, 0);
++        assert_eq!(lights[0].color.x, 0.0);
++        assert_eq!(lights[0].spot_outer, 65.0);
++        assert_eq!(lights[0].spot_inner_percent, 50.0);
++        assert_eq!(lights[0].area_or_cookie_size.y, 6.0);
++    }
++
++    #[test]
++    fn indirect_changes_coalesce_independently_of_light_snapshots() {
++        let mut updates = Updates::default();
++        assert!(!updates.publish_indirect(1.0));
++        updates.reset(true);
++        assert!(updates.publish(&[state()]));
++        assert!(updates.publish_indirect(2.0));
++        assert!(updates.publish_indirect(0.0));
++        assert!(updates.publish(&[]));
++        assert_eq!(updates.pending_indirect.take(), Some(0.0));
++        assert!(updates.pending.as_ref().unwrap().is_empty());
++        assert!(updates.publish_indirect(3.0));
++        for invalid in [f32::NAN, f32::INFINITY, -1.0] {
++            assert!(!updates.publish_indirect(invalid));
++        }
++        assert_eq!(updates.pending_indirect, Some(3.0));
++        updates.reset(false);
++        updates.reset(true);
++        assert!(updates.pending_indirect.is_none());
++    }
++
++    #[test]
++    fn ffi_and_shader_layouts_match() {
++        assert_eq!(std::mem::size_of::<PreviewLightState>(), 88);
++        assert_eq!(std::mem::offset_of!(PreviewLightState, ty), 68);
++        assert_eq!(std::mem::offset_of!(PreviewLightState, cookie), 80);
++        assert_eq!(std::mem::offset_of!(PreviewLightState, shadow_radius_or_angle), 84);
++        assert_eq!(std::mem::size_of::<crate::shader::PreviewPushConstants>(), 40);
++        assert_eq!(std::mem::offset_of!(crate::shader::PreviewPushConstants, lights_address), 24);
++        assert_eq!(std::mem::offset_of!(crate::shader::PreviewPushConstants, indirect_intensity), 32);
++    }
++}
++
+diff --git a/src/shader.rs b/src/shader.rs
+index 9c30855..d8626a2 100644
+--- a/src/shader.rs
++++ b/src/shader.rs
+@@ -10,6 +10,7 @@ pub enum ShaderName {
+     BakeDirectEmission,
+     Preview,
+     AdjustSamples,
++    PreviewSurface,
+     ShadowMask,
+ }
+ 
+@@ -21,6 +22,7 @@ pub fn load_shader_bytes(name: ShaderName) -> Vec<u32> {
+         ShaderName::BakeLightProbes => include_bytes!(concat!(env!("OUT_DIR"), "/bake_sh.spv")),
+         ShaderName::BakeIndirect => include_bytes!(concat!(env!("OUT_DIR"), "/bake_indirect.spv")),
+         ShaderName::Preview => include_bytes!(concat!(env!("OUT_DIR"), "/preview.spv")),
++        ShaderName::PreviewSurface => include_bytes!(concat!(env!("OUT_DIR"), "/preview_surface.spv")),
+         ShaderName::BakeDirectLight => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_light.spv")),
+         ShaderName::BakeDirectEmission => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_emission.spv")),
+         ShaderName::ShadowMask => include_bytes!(concat!(env!("OUT_DIR"), "/bake_shadowmask.spv")),
+@@ -483,4 +485,7 @@ pub struct PreviewPushConstants {
+     pub width: u32,
+     pub height: u32,
+     pub bounce_count: u32,
++    pub lights_address: u64,
++    pub indirect_intensity: f32,
++    pub pad: u32,
+ }
+diff --git a/src/texture2d.rs b/src/texture2d.rs
+index a836d3a..ccc2a19 100644
+--- a/src/texture2d.rs
++++ b/src/texture2d.rs
+@@ -28,7 +28,7 @@ pub fn register_gpu_alloc(bytes: u64) -> f64 {
+     mb
+ }
+ 
+-fn unregister_gpu_alloc(bytes: u64) {
++pub(crate) fn unregister_gpu_alloc(bytes: u64) {
+     ALLOCATED_GPU_MEMORY.fetch_sub(bytes, Ordering::Relaxed);
+ }
+ 
+@@ -134,14 +134,13 @@ impl Texture2D {
+             if !self.view().is_null() {
+                 vk.device.destroy_image_view(self.view, None);
+             }
++            if !self.image.is_null() {
++                vk.device.destroy_image(self.image, None);
++            }
+             if !self.memory().is_null() {
+                 vk.device.free_memory(self.memory, None);
+                 unregister_gpu_alloc(self.bytes);
+             }
+-
+-            if !self.image.is_null() {
+-                vk.device.destroy_image(self.image, None);
+-            }
+         };
+ 
+         self.view = vk::ImageView::null();
+diff --git a/src/texture_array.rs b/src/texture_array.rs
+index ecf06cf..e5041e0 100644
+--- a/src/texture_array.rs
++++ b/src/texture_array.rs
+@@ -9,6 +9,8 @@ use crate::{
+ pub struct TextureArray {
+     pub textures: Vec<Texture2D>,
+     memory: vk::DeviceMemory,
++    individual: bool,
++    bytes: u64,
+ }
+ 
+ pub struct TextureDescriptor {
+@@ -132,13 +134,38 @@ impl TextureArray {
+             })
+             .collect();
+ 
+-        Self { textures, memory }
++        Self { textures, memory, individual: false, bytes: total_size }
++    }
++
++    // Preview atlases own separate allocations so unchanged images can move to
++    // the next scene without copying pixels or retaining deleted groups' memory.
++    pub fn new_reusing(vk: &VulkanContext, specs: Vec<TextureDescriptor>,
++        reuse: &[Option<usize>], old: &mut Self) -> Self {
++        let mut retained = Vec::with_capacity(specs.len());
++        for (index, spec) in specs.iter().enumerate() {
++            retained.push(if let Some(Some(previous)) = reuse.get(index) {
++                assert!(old.individual);
++                let texture = &mut old.textures[*previous];
++                assert!(!texture.image.is_null());
++                assert_eq!((texture.width, texture.height, texture.format),
++                    (spec.width, spec.height, spec.format));
++                Some(std::mem::replace(texture, Texture2D::null()))
++            } else { None });
++        }
++        // Release obsolete images before allocating their replacements, avoiding
++        // a temporary second copy of large invalidated atlases in VRAM.
++        old.destroy(vk);
++        let textures = specs.into_iter().zip(retained).map(|(spec, retained)| retained.unwrap_or_else(||
++            Texture2D::new(vk, spec.width, spec.height, spec.format, spec.usage, spec.name))).collect();
++        Self { textures, memory: vk::DeviceMemory::null(), individual: true, bytes: 0 }
+     }
+ 
+     pub fn null() -> TextureArray {
+         TextureArray {
+             textures: Vec::new(),
+             memory: vk::DeviceMemory::null(),
++            individual: false,
++            bytes: 0,
+         }
+     }
+ 
+@@ -147,15 +174,19 @@ impl TextureArray {
+     }
+ 
+     pub fn destroy(&mut self, vk: &VulkanContext) {
+-        for tex in &self.textures {
+-            unsafe {
++        for mut tex in self.textures.drain(..) {
++            if tex.image.is_null() { continue; }
++            if self.individual { tex.destroy(vk); }
++            else { unsafe {
+                 vk.device.destroy_image_view(tex.view, None);
+                 vk.device.destroy_image(tex.image, None);
+-            }
++            } }
+         }
+ 
+         if !self.memory.is_null() {
+             unsafe { vk.device.free_memory(self.memory, None) };
++            crate::texture2d::unregister_gpu_alloc(self.bytes);
++            self.bytes = 0;
+             self.memory = vk::DeviceMemory::null();
+         }
+     }

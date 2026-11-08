@@ -1,0 +1,10 @@
+# Local build and isolated Unity projects
+Development~/.work/
+dist/
+.vs/
+*.csproj
+*.sln
+*.suo
+*.user
+*.pdb
+*.pdb.meta

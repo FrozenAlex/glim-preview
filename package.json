@@ -1,0 +1,21 @@
+{
+  "name": "com.frozenalex.glim-preview",
+  "version": "0.1.0",
+  "displayName": "Glim Live Preview",
+  "unity": "2022.3",
+  "description": "Independent live path-traced Scene View preview for Glim 0.12, including scene color correction and HDR diagnostics.",
+  "dependencies": {
+    "io.github.z3y.glim": "0.12.0"
+  },
+  "vpmDependencies": {
+    "io.github.z3y.glim": ">=0.12.0 <0.13.0"
+  },
+  "author": {
+    "name": "FrozenAlex",
+    "url": "https://github.com/FrozenAlex"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FrozenAlex/glim-preview.git"
+  }
+}
