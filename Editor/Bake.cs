@@ -87,7 +87,10 @@ namespace FrozenAlex.GlimPreview
         {
             if (!config.is_preview) throw new ArgumentException("The add-on only supports preview rendering.");
             if (running || renderThread != null) throw new InvalidOperationException("Stop the current preview before opening another.");
-            if (Application.platform != RuntimePlatform.WindowsEditor) throw new PlatformNotSupportedException("Glim Live Preview currently requires the Windows editor.");
+            if (Application.platform != RuntimePlatform.WindowsEditor &&
+                Application.platform != RuntimePlatform.LinuxEditor)
+                throw new PlatformNotSupportedException(
+                    "Glim Live Preview requires the Windows or Linux editor.");
             if (EditorApplication.isPlayingOrWillChangePlaymode) throw new InvalidOperationException("Open the preview in Edit mode.");
             if (global::Glim.Bake.IsBaking) throw new InvalidOperationException("Wait for Glim's bake or preview to finish first.");
             if (!baker || !baker.group) throw new ArgumentException("Select a Glim Lightmapper with a lightmap group.");
