@@ -1,4 +1,4 @@
-"""Create the installable VPM archive from a freshly built Windows native DLL."""
+"""Create the VPM archive from freshly built Windows and Linux x64 libraries."""
 
 import argparse
 import hashlib
@@ -11,10 +11,12 @@ import zipfile
 
 
 DLL = "Editor/glim_preview_addon_012_v1.dll"
+SO = "Editor/glim_preview_addon_012_v1.so"
+SO_META = "Development~/glim_preview_addon_012_v1.so.meta"
 PACKAGE = "com.frozenalex.glim-preview"
 
 
-def package(root, native_dll, output, repository, tag=None):
+def package(root, native_dll, native_so, output, repository, tag=None):
     manifest = json.loads((root / "package.json").read_text(encoding="utf-8-sig"))
     version = manifest["version"]
     if manifest["name"] != PACKAGE or not re.fullmatch(
@@ -36,15 +38,28 @@ def package(root, native_dll, output, repository, tag=None):
             or not struct.unpack_from("<H", native, pe + 22)[0] & 0x2000):
         raise ValueError("Native library must be a Windows x64 DLL")
 
+    linux = native_so.read_bytes()
+    if (len(linux) < 64 or linux[:7] != b"\x7fELF\x02\x01\x01"
+            or struct.unpack_from("<HH", linux, 16) != (3, 62)):
+        raise ValueError("Native library must be a Linux x64 ELF shared library")
+    for name in (DLL + ".meta", SO_META):
+        if not (root / name).is_file():
+            raise ValueError(f"Missing Unity importer metadata: {name}")
+
     filename = f"{PACKAGE}-{version}.zip"
     manifest.pop("zipSHA256", None)
     manifest["url"] = f"https://github.com/{repository}/releases/download/{expected_tag}/{filename}"
     files = {p.relative_to(root).as_posix(): p.read_bytes()
              for p in sorted((root / "Editor").rglob("*"))
-             if p.is_file() and p.suffix.lower() != ".pdb" and not p.name.endswith(".pdb.meta")}
+             if p.is_file() and p.suffix.lower() not in (".pdb", ".dll", ".so", ".dylib")
+             and not p.name.endswith(".pdb.meta")}
     for name in ("Editor.meta", "package.json.meta", "README.md", "README.md.meta", "LICENSE.md", "LICENSE.md.meta"):
         files[name] = (root / name).read_bytes()
     files[DLL] = native
+    files[SO] = linux
+    # Keep the Linux template outside Editor so Unity cannot delete an orphan
+    # .meta from a Windows source checkout that has no built Linux binary yet.
+    files[SO + ".meta"] = (root / SO_META).read_bytes()
     files["package.json"] = (json.dumps(manifest, indent=2) + "\n").encode()
     notices = root / "Development~" / "licenses"
     for path in sorted(notices.iterdir()):
@@ -70,11 +85,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--native-dll", type=Path, required=True)
+    parser.add_argument("--native-so", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repository", default="FrozenAlex/glim-preview")
     parser.add_argument("--tag")
     args = parser.parse_args()
-    archive, tag = package(args.root, args.native_dll, args.output, args.repository, args.tag)
+    archive, tag = package(args.root, args.native_dll, args.native_so, args.output, args.repository, args.tag)
     print(f"Created {archive}")
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:

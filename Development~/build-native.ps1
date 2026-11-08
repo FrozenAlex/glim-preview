@@ -3,6 +3,14 @@ param(
     [switch]$GpuTests
 )
 $ErrorActionPreference = 'Stop'
+$windowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+if (!$windowsHost -and !$IsLinux) { throw 'Supported build hosts are Windows x64 and Linux x64 (PowerShell 7).' }
+if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
+    throw 'The native preview requires an x64 build host.'
+}
+$target = if ($windowsHost) { 'x86_64-pc-windows-msvc' } else { 'x86_64-unknown-linux-gnu' }
+$library = if ($windowsHost) { 'glim.dll' } else { 'libglim.so' }
+$filename = if ($windowsHost) { 'glim_preview_addon_012_v1.dll' } else { 'glim_preview_addon_012_v1.so' }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $work = Join-Path $PSScriptRoot '.work'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -18,18 +26,22 @@ if ((& git -C $source rev-parse HEAD).Trim() -ne $revision) { throw 'Upstream ta
 if ($LASTEXITCODE) { throw 'Native preview patch could not be applied.' }
 Push-Location $source
 try {
-    & cargo test --locked --lib preview_ --release
+    & cargo test --locked --lib preview_ --release --target $target
     if ($LASTEXITCODE) { throw 'Native preview tests failed.' }
     if ($GpuTests) {
-        & cargo test --locked --lib embedded_gpu_emission_camera_and_resize --release -- --ignored
+        & cargo test --locked --lib embedded_gpu_emission_camera_and_resize --release --target $target -- --ignored
         if ($LASTEXITCODE) { throw 'GPU preview tests failed.' }
     }
-    & cargo build --locked --release --lib
+    & cargo build --locked --release --lib --target $target
     if ($LASTEXITCODE) { throw 'Native preview build failed.' }
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-    $output = Join-Path $OutputDirectory 'glim_preview_addon_012_v1.dll'
-    Copy-Item -LiteralPath (Join-Path $source 'target/release/glim.dll') -Destination $output
+    $output = Join-Path $OutputDirectory $filename
+    $targetDirectory = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $source 'target' }
+    Copy-Item -LiteralPath (Join-Path $targetDirectory "$target/release/$library") -Destination $output
+    if (!$windowsHost) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot "$filename.meta") -Destination "$output.meta"
+    }
     Get-FileHash -LiteralPath $output -Algorithm SHA256
 }
 finally { Pop-Location }
-# Install the output only while that add-on DLL is not loaded in Unity.
+# Install the output only while that add-on library is not loaded in Unity.

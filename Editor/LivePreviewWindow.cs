@@ -75,7 +75,8 @@ namespace FrozenAlex.GlimPreview
 
         internal static string CompatibilityError()
         {
-            if (Application.platform != RuntimePlatform.WindowsEditor) return "This add-on currently supports the Windows x64 editor.";
+            if (Application.platform != RuntimePlatform.WindowsEditor && Application.platform != RuntimePlatform.LinuxEditor)
+                return "This add-on supports the Windows x64 and Linux x64 editors.";
             var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(GlimLightmapper).Assembly);
             if (package == null || !package.version.StartsWith("0.12.", StringComparison.Ordinal))
                 return "This add-on supports Glim 0.12.x. Install a matching add-on version after upgrading Glim.";

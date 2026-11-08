@@ -1,6 +1,9 @@
 # Glim Live Preview
 
-Independent editor add-on for **Glim 0.12.x**, Unity 2022.3 and Windows x64.
+Independent editor add-on for **Glim 0.12.x**, Unity 2022.3, Windows x64 and Linux x64.
+These are the two platforms built by upstream Glim. Linux builds target Ubuntu
+22.04 or newer (glibc 2.35+), with a Vulkan-capable graphics driver.
+Optional Linux denoising needs `libOpenImageDenoise.so.2` on the library search path.
 The add-on uses its own editor assembly and native library. It leaves Glim's
 installed package, inspector, bake renderer, and scene components in place.
 
@@ -65,7 +68,7 @@ version needs a matching add-on port.
 
 The repository's `Development~` directory contains the native patch,
 pinned upstream revision, build script, and isolated Unity visual regression.
-The native DLL has a distinct name and cannot replace Glim's baking DLL.
+The native libraries have distinct names and cannot replace Glim's baking libraries.
 
 The exporter and renderer are derived from Glim, copyright 2026 z3y, under the
 included MIT license. Native third-party notices accompany the source patch.
@@ -76,10 +79,11 @@ This package directory is the Git repository root. Unity loads `Editor/` directl
 when the repository is installed under a project's `Packages` directory.
 `Development~` contains build tools and tests; Unity ignores folders ending in `~`.
 
-Native DLLs are distributed in release packages and are not tracked in Git.
-For a source checkout, close Unity and build the DLL into `Editor/` before using
-the preview or running Unity validation. Its `.meta` file remains tracked to
-preserve the importer settings.
+Native libraries are distributed in release packages and are not tracked in Git.
+For a source checkout, close Unity and build the library into `Editor/` before
+using the preview. Run the build script with PowerShell 7 on Linux. Its `.meta`
+file remains tracked to preserve the importer settings. The Unity validation
+script currently targets Windows.
 
 ```powershell
 ./Development~/build-native.ps1 -OutputDirectory ./Editor -GpuTests
@@ -95,13 +99,14 @@ post-processing package installed. See [development notes](Development~/README.m
 Update `package.json`'s version, commit and push, then run **Actions → Build Release**
 with **publish** enabled. Alternatively, push a matching version tag such as
 `v0.1.1`. Leaving **publish** disabled builds downloadable workflow artifacts only.
-The workflow rebuilds the patched Rust renderer and publishes a VPM ZIP, manifest,
+The workflow builds the patched Rust renderer on Windows and Ubuntu, packages
+both native libraries in one VPM ZIP, and publishes the ZIP, manifest,
 checksum, and signed build provenance bundle. The VPM listing checks for releases hourly; its **Build Repo Listing**
 workflow can also be run manually for an immediate refresh.
 
 ## Verify a release
 
-New workflow builds attest the ZIP, manifest, checksum file, and native DLL using
+New workflow builds attest the ZIP, manifest, checksum file, and Windows DLL and Linux SO using
 [GitHub artifact attestations](https://github.com/actions/attest). With GitHub CLI
 installed, replace `VERSION` with the downloaded version and run:
 
@@ -109,7 +114,7 @@ installed, replace `VERSION` with the downloaded version and run:
 gh attestation verify ./com.frozenalex.glim-preview-VERSION.zip --repo FrozenAlex/glim-preview --signer-workflow FrozenAlex/glim-preview/.github/workflows/release.yml --deny-self-hosted-runners
 ```
 
-You can verify the extracted native DLL with the same command using its file path.
+You can verify the extracted native library with the same command using its file path.
 The release also includes `provenance.sigstore.json`; pass
 `--bundle ./provenance.sigstore.json` to use that bundle instead of fetching it
 from GitHub. The original `0.1.0` release predates attestations.

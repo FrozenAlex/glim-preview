@@ -23,9 +23,87 @@ defaults:
     shell: pwsh
 
 jobs:
-  build:
-    runs-on: windows-2022
+  native:
+    name: Native (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-2022
+            slang: windows-x86_64.zip
+            sha256: 36029c50ef0c82f2616ffb02e0ed27d642cb44a2a297d531cc2ad333b85b85b6
+            library: glim_preview_addon_012_v1.dll
+          - platform: linux-x64
+            runner: ubuntu-22.04
+            slang: linux-x86_64.tar.gz
+            sha256: 9445cf0b35332bfda055c9424e307f957ff58befb04c5b45b9f9f29894a41cf8
+            library: glim_preview_addon_012_v1.so
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libwayland-dev libxi-dev libxinerama-dev libxkbcommon-dev libxrandr-dev libxcursor-dev
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          if ($LASTEXITCODE) { throw 'Rust installation failed.' }
+          rustup override set 1.97.1
+          if ($LASTEXITCODE) { throw 'Rust selection failed.' }
+
+      - name: Install pinned Slang compiler
+        env:
+          SLANG_ASSET: ${{ matrix.slang }}
+          SLANG_SHA256: ${{ matrix.sha256 }}
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "slang-$env:SLANG_ASSET"
+          Invoke-WebRequest "https://github.com/shader-slang/slang/releases/download/v2026.14/slang-2026.14-$env:SLANG_ASSET" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SLANG_SHA256) {
+            throw 'Slang checksum mismatch.'
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'slang'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          if ($IsWindows) {
+            Expand-Archive $archive -DestinationPath $destination
+            $compilerName = 'slangc.exe'
+          } else {
+            tar --no-same-owner -xzf $archive -C $destination
+            if ($LASTEXITCODE) { throw 'Slang extraction failed.' }
+            $compilerName = 'slangc'
+          }
+          $compiler = @(Get-ChildItem $destination -Filter $compilerName -File -Recurse)
+          if ($compiler.Count -ne 1) { throw 'Expected exactly one Slang compiler.' }
+          $compiler[0].DirectoryName | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build native library and run native unit tests
+        run: ./Development~/build-native.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'native')
+
+      - name: Verify library loading and Unity bridge exports
+        env:
+          NATIVE_LIBRARY: ${{ matrix.library }}
+        run: |
+          python Development~/verify_native.py (Join-Path $env:RUNNER_TEMP "native/$env:NATIVE_LIBRARY")
+          if ($LASTEXITCODE) { throw 'Native library loading or exports check failed.' }
+
+      - name: Upload native library
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native/${{ matrix.library }}
+          if-no-files-found: error
+
+  build:
+    name: Package and attest
+    needs: native
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
@@ -34,6 +112,12 @@ jobs:
       tag: ${{ steps.package.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/native
 
       - name: Test package layout and version checks
         run: |
@@ -44,40 +128,17 @@ jobs:
             throw 'Release tag must match the package.json version.'
           }
 
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          if ($LASTEXITCODE) { throw 'Rust installation failed.' }
-          rustup override set 1.97.1
-          if ($LASTEXITCODE) { throw 'Rust selection failed.' }
-
-      - name: Install pinned Slang compiler
-        run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'slang.zip'
-          Invoke-WebRequest 'https://github.com/shader-slang/slang/releases/download/v2026.14/slang-2026.14-windows-x86_64.zip' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '36029c50ef0c82f2616ffb02e0ed27d642cb44a2a297d531cc2ad333b85b85b6') {
-            throw 'Slang checksum mismatch.'
-          }
-          $destination = Join-Path $env:RUNNER_TEMP 'slang'
-          Expand-Archive $archive -DestinationPath $destination
-          $compiler = @(Get-ChildItem $destination -Filter slangc.exe -Recurse)
-          if ($compiler.Count -ne 1) { throw 'Expected exactly one Slang compiler.' }
-          $compiler[0].DirectoryName | Out-File $env:GITHUB_PATH -Append -Encoding utf8
-
-      - name: Rebuild native DLL and run native unit tests
-        run: ./Development~/build-native.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'native')
-
       - name: Package VPM release
         id: package
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
-          $arguments = @('Development~/package_release.py', '--native-dll', (Join-Path $env:RUNNER_TEMP 'native/glim_preview_addon_012_v1.dll'), '--output', 'dist', '--repository', $env:RELEASE_REPOSITORY)
+          $arguments = @('Development~/package_release.py', '--native-dll', (Join-Path $env:RUNNER_TEMP 'native/glim_preview_addon_012_v1.dll'), '--native-so', (Join-Path $env:RUNNER_TEMP 'native/glim_preview_addon_012_v1.so'), '--output', 'dist', '--repository', $env:RELEASE_REPOSITORY)
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $arguments += @('--tag', $env:GITHUB_REF_NAME) }
           python @arguments
           if ($LASTEXITCODE) { throw 'VPM packaging failed.' }
 
-      - name: Attest release files and native DLL
+      - name: Attest release files and both native libraries
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -86,6 +147,7 @@ jobs:
             ${{ github.workspace }}/dist/package.json
             ${{ github.workspace }}/dist/SHA256SUMS
             ${{ runner.temp }}/native/glim_preview_addon_012_v1.dll
+            ${{ runner.temp }}/native/glim_preview_addon_012_v1.so
           create-storage-record: false
 
       - name: Include and verify provenance bundle
@@ -96,7 +158,7 @@ jobs:
         run: |
           Copy-Item -LiteralPath $env:ATTESTATION_BUNDLE -Destination dist/provenance.sigstore.json
           $subjects = @(Get-ChildItem dist -File | Where-Object Name -ne 'provenance.sigstore.json' | ForEach-Object FullName)
-          $subjects += Join-Path $env:RUNNER_TEMP 'native/glim_preview_addon_012_v1.dll'
+          $subjects += @(Get-ChildItem (Join-Path $env:RUNNER_TEMP 'native') -File | ForEach-Object FullName)
           foreach ($subject in $subjects) {
             gh attestation verify $subject --bundle dist/provenance.sigstore.json --repo $env:RELEASE_REPOSITORY --signer-workflow "$env:RELEASE_REPOSITORY/.github/workflows/release.yml" --source-digest $env:GITHUB_SHA --deny-self-hosted-runners
             if ($LASTEXITCODE) { throw "Provenance verification failed: $subject" }

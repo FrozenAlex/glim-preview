@@ -167,11 +167,7 @@ namespace FrozenAlex.GlimPreview
 
         }
 
-#if UNITY_EDITOR_WIN
         const string DLL_NAME = "glim_preview_addon_012_v1";
-#else
-        const string DLL_NAME = "glim";
-#endif
 
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr app_new(GlimConfig config, FfiString output_dir);
