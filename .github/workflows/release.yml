@@ -1,0 +1,108 @@
+name: Build Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the package version as a GitHub release (otherwise build only)
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    outputs:
+      tag: ${{ steps.package.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Test package layout and version checks
+        run: |
+          python -m unittest discover -s Development~ -p test_package_release.py -v
+          if ($LASTEXITCODE) { throw 'Package tests failed.' }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw 'Release tag must match the package.json version.'
+          }
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          if ($LASTEXITCODE) { throw 'Rust installation failed.' }
+          rustup override set 1.97.1
+          if ($LASTEXITCODE) { throw 'Rust selection failed.' }
+
+      - name: Install pinned Slang compiler
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'slang.zip'
+          Invoke-WebRequest 'https://github.com/shader-slang/slang/releases/download/v2026.14/slang-2026.14-windows-x86_64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '36029c50ef0c82f2616ffb02e0ed27d642cb44a2a297d531cc2ad333b85b85b6') {
+            throw 'Slang checksum mismatch.'
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'slang'
+          Expand-Archive $archive -DestinationPath $destination
+          $compiler = @(Get-ChildItem $destination -Filter slangc.exe -Recurse)
+          if ($compiler.Count -ne 1) { throw 'Expected exactly one Slang compiler.' }
+          $compiler[0].DirectoryName | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Rebuild native DLL and run native unit tests
+        run: ./Development~/build-native.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'native')
+
+      - name: Package VPM release
+        id: package
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $arguments = @('Development~/package_release.py', '--native-dll', (Join-Path $env:RUNNER_TEMP 'native/glim_preview_addon_012_v1.dll'), '--output', 'dist', '--repository', $env:RELEASE_REPOSITORY)
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $arguments += @('--tag', $env:GITHUB_REF_NAME) }
+          python @arguments
+          if ($LASTEXITCODE) { throw 'VPM packaging failed.' }
+
+      - name: Upload release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vpm-package
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: vpm-package
+          path: dist
+
+      - name: Create and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          $options = @('--draft', '--target', $env:GITHUB_SHA, '--title', "Glim Live Preview $env:RELEASE_TAG", '--generate-notes')
+          if ($env:RELEASE_TAG.Contains('-')) { $options += '--prerelease' }
+          $assets = @(Get-ChildItem dist -File | ForEach-Object FullName)
+          gh release create $env:RELEASE_TAG @assets @options
+          if ($LASTEXITCODE) { throw 'Release creation failed. Published versions are never overwritten; remove a failed draft before retrying.' }
+          gh release edit $env:RELEASE_TAG --draft=false
+          if ($LASTEXITCODE) { throw 'Publishing failed; the uploaded release remains a draft.' }

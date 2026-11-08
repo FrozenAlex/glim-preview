@@ -8,3 +8,5 @@
 *.meta text eol=lf
 *.patch text eol=lf
 *.dll binary
+*.py text eol=lf
+*.yml text eol=lf

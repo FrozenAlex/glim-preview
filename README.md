@@ -4,6 +4,14 @@ Independent editor add-on for **Glim 0.12.x**, Unity 2022.3 and Windows x64.
 The add-on uses its own editor assembly and native library. It leaves Glim's
 installed package, inspector, bake renderer, and scene components in place.
 
+## Install with VCC
+
+Add [FrozenAlex's package listing](https://frozenalex.com/vpm/) and
+[z3y's listing](https://z3y.github.io/vpm-package-listing/) to Creator Companion.
+Then add **Glim Live Preview** to your Unity 2022.3 project. The add-on requires
+Glim 0.12.x from z3y's listing. The direct listing URL is
+`https://frozenalex.com/vpm/index.json`.
+
 ## Open the preview
 
 1. Open **Tools в†’ Glim в†’ Live Preview**, or use **Live Preview** in a Glim
@@ -76,3 +84,12 @@ when the repository is installed under a project's `Packages` directory.
 For a checkout outside a Unity project, pass `-UnityProject 'path/to/project'`
 to the validation script. That project must have Glim 0.12 and Unity's
 post-processing package installed. See [development notes](Development~/README.md).
+
+## Publishing
+
+Update `package.json`'s version, commit and push, then run **Actions → Build Release**
+with **publish** enabled. Alternatively, push a matching version tag such as
+`v0.1.1`. Leaving **publish** disabled builds downloadable workflow artifacts only.
+The workflow rebuilds the patched Rust renderer and publishes a VPM ZIP, manifest,
+and checksum. The VPM listing checks for releases hourly; its **Build Repo Listing**
+workflow can also be run manually for an immediate refresh.

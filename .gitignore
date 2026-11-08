@@ -8,3 +8,4 @@ dist/
 *.user
 *.pdb
 *.pdb.meta
+__pycache__/
