@@ -78,6 +78,7 @@ namespace FrozenAlex.GlimPreview
                 _context.UpdatePreviewSettings();
                 _context.UpdatePreviewLights();
                 _context.UpdatePreviewMaterials();
+                _context.UpdatePreviewSkybox();
                 _context.UpdatePreviewGeometry();
             }
             catch (Exception e) { LastError = e.Message; Debug.LogException(e); StopPreview(); }

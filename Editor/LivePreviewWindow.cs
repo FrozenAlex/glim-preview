@@ -136,7 +136,7 @@ namespace FrozenAlex.GlimPreview
                 if (GUILayout.Button("Stop Preview")) Bake.StopPreview();
             if (Bake.IsPreviewRunning)
                 EditorGUILayout.LabelField(PreviewViewport.Active ? $"Scene View В· {PreviewViewport.Samples} samples" : "Separate preview window is running.");
-            EditorGUILayout.HelpBox("Lights, base colors/textures, emission, and existing object transforms update live. Stop and reopen after adding, removing, disabling, or replacing meshes. The scene must be saved before starting.", MessageType.None);
+            EditorGUILayout.HelpBox("Lights, skybox, base colors/textures, emission, and existing object transforms update live. Stop and reopen after adding, removing, disabling, or replacing meshes. The scene must be saved before starting.", MessageType.None);
             if (!string.IsNullOrEmpty(error ?? Bake.LastError)) EditorGUILayout.HelpBox(error ?? Bake.LastError, MessageType.Error);
         }
 

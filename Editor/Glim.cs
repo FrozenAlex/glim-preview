@@ -112,6 +112,8 @@ namespace FrozenAlex.GlimPreview
         GlimLightmapper previewLightmapper;
         float? submittedIndirectMultiplier;
         PreviewMaterials previewMaterials;
+        PreviewSkybox previewSkybox;
+        public void UpdatePreviewSkybox() => previewSkybox?.Update();
         readonly PreviewGeometry previewGeometry = new();
         public void UpdatePreviewGeometry() => previewGeometry.Update();
         readonly List<MeshRenderer> previewRendererCopies = new();
@@ -122,6 +124,8 @@ namespace FrozenAlex.GlimPreview
         {
             previewMaterials?.Dispose();
             previewMaterials = null;
+            previewSkybox?.Dispose();
+            previewSkybox = null;
             foreach (int id in previewCopyIds) PreviewRendererCopy.Release(id);
             previewCopyIds.Clear();
             foreach (var mesh in previewMeshes) if (mesh) Object.DestroyImmediate(mesh);
@@ -350,6 +354,7 @@ namespace FrozenAlex.GlimPreview
             try
             {
             this.skyboxPixels = SkyboxCapture.Capture(SceneManager.GetActiveScene());
+            if (isPreview) previewSkybox = new PreviewSkybox(SceneManager.GetActiveScene(), config.skybox_intensity);
 
             var bakerId = GlobalObjectId.GetGlobalObjectIdSlow(lightmapper);
 

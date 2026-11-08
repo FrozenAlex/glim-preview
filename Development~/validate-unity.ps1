@@ -2,7 +2,7 @@ param(
     [string]$UnityEditor = 'C:\Program Files\Unity\Hub\Editor\2022.3.22f1\Editor\Unity.exe',
     [string]$AddonPackage = '',
     [string]$UnityProject = '',
-    [ValidateSet('PreviewValidation', 'LightmapperSelectionValidation')]
+    [ValidateSet('PreviewValidation', 'LightmapperSelectionValidation', 'SkyboxValidation')]
     [string]$Validation = 'PreviewValidation'
 )
 $ErrorActionPreference = 'Stop'

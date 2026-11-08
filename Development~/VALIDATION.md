@@ -81,3 +81,25 @@ This change prepares the add-on payloads; it does not port the later upstream re
   selection before the first scene save, and a competing temporary-scene component.
 - This test exercises the scene replacement lifecycle without running a lighting bake.
   No native library changes or rebuild were required.
+
+## Live skybox changes (2026-11-09)
+
+- Native unit tests: 20 passed, with the two GPU-only tests excluded from that run.
+  Coverage includes skybox dimensions, finite HDR pixels, inactive-session rejection,
+  and coalescing capture and intensity updates independently.
+- The embedded GPU regression passed both hardware and software ray tracing with
+  Khronos validation enabled and zero warnings/errors. It checks changed environment
+  lighting, background, denoising, cubemap resizing, and 24 consecutive intensity
+  changes. Pipeline respecialization reuses descriptor sets instead of exhausting
+  the upstream descriptor pool. Push constants and integer features are unchanged.
+- The isolated Unity 2022.3 skybox regression passed: all six async cubemap faces
+  matched the initial upstream export exactly (maximum error zero), and exposure,
+  Undo, texture content, material replacement, resolution, removal, and procedural
+  sun changes refreshed the preview without rebuilding geometry.
+- Idle polling and intensity-only edits performed no cubemap captures. Stopping
+  during a pending capture cleaned up temporary resources.
+- The full existing Unity preview regression also passed after the change,
+  including albedo/emission, grading, diagnostic modes, denoising, transforms,
+  manual restart, and baked UV preservation.
+- Release native build succeeded and all 26 Unity bridge exports loaded. The
+  regenerated patch applies cleanly to the original Glim 0.12.0 revision.

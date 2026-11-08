@@ -258,6 +258,14 @@ namespace FrozenAlex.GlimPreview
         internal static extern void app_set_skybox(IntPtr app, Color[] pixels, uint pixels_length, uint width, uint height);
 
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool app_update_preview_skybox([In] Color[] pixels, uint floatCount, uint resolution);
+
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool app_update_preview_skybox_intensity(float intensity);
+
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static unsafe extern void app_add_lightmap_group(IntPtr app, LightmapSettings settings, byte* albedoPixels, uint albedoPixelsLength, byte* emissionPixels, uint emissionPixelsLength);
 
         [StructLayout(LayoutKind.Sequential)]

@@ -494,14 +494,40 @@ index c3f6374..b2140e6 100644
      }
  
      pub fn look_at(&mut self, target: Vector3) {
+diff --git a/src/compute_shader.rs b/src/compute_shader.rs
+index a5395ee..e3acbe9 100644
+--- a/src/compute_shader.rs
++++ b/src/compute_shader.rs
+@@ -90,6 +90,20 @@ impl ComputeShader {
+         }
+     }
+ 
++    // Caller must finish GPU work first. Preserve layouts/descriptors: the pool
++    // has only 64 sets and does not support individual descriptor-set frees.
++    pub fn respecialize(&mut self, vk: &VulkanContext, info: &vk::SpecializationInfo) {
++        let stage = vk::PipelineShaderStageCreateInfo::default()
++            .stage(vk::ShaderStageFlags::COMPUTE).module(self.module)
++            .name(c"main").specialization_info(info);
++        let create_info = vk::ComputePipelineCreateInfo::default()
++            .stage(stage).layout(self.pipeline_layout);
++        let replacement = unsafe { vk.device.create_compute_pipelines(
++            vk::PipelineCache::null(), &[create_info], None) }.unwrap()[0];
++        unsafe { vk.device.destroy_pipeline(self.pipeline, None); }
++        self.pipeline = replacement;
++    }
++
+     pub fn destroy(&mut self, vk: &VulkanContext) {
+         assert!(!self.module.is_null());
+         assert!(!self.pipeline.is_null());
 diff --git a/src/lib.rs b/src/lib.rs
-index 8aeb13a..166c172 100644
+index 8aeb13a..6ebc2db 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,5 +1,14 @@
+@@ -1,5 +1,15 @@
  #![allow(unsafe_op_in_unsafe_fn)]
  
 +mod preview_updates;
++mod preview_skybox;
 +mod preview_bridge;
 +mod preview_denoise;
 +mod preview_geometry;
@@ -513,7 +539,7 @@ index 8aeb13a..166c172 100644
  use ash::vk::{self, Handle};
  use std::io::{self, Write};
  use std::mem;
-@@ -85,6 +94,10 @@ pub struct Glim {
+@@ -85,6 +95,10 @@ pub struct Glim {
      pub config: GlimConfig,
      pub vk: VulkanContext,
      pub window: *mut GLFWwindow,
@@ -524,7 +550,7 @@ index 8aeb13a..166c172 100644
  
      pub meshes: [Mesh; GEOMETRIES_VARIANTS],
  
-@@ -106,6 +119,7 @@ pub struct Glim {
+@@ -106,6 +120,7 @@ pub struct Glim {
      pub camera: Camera,
  
      pub preview_shader: ComputeShader,
@@ -532,7 +558,7 @@ index 8aeb13a..166c172 100644
      pub init_from_camera_shader: ComputeShader,
      pub preview_initialized: bool,
  
-@@ -151,6 +165,9 @@ impl Drop for Glim {
+@@ -151,6 +166,9 @@ impl Drop for Glim {
          if !self.preview_shader.pipeline.is_null() {
              self.preview_shader.destroy(&self.vk);
          }
@@ -542,7 +568,7 @@ index 8aeb13a..166c172 100644
          self.gpu_mesh.destroy(&self.vk);
  
          if !self.bvh_nodes.buffer.is_null() {
-@@ -232,7 +249,8 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
+@@ -232,7 +250,8 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
      let vk = &mut app.vk;
      let shader = &app.init_from_camera_shader;
  
@@ -552,7 +578,7 @@ index 8aeb13a..166c172 100644
  
      let constants_bytes = as_bytes(&push);
  
-@@ -299,11 +317,17 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
+@@ -299,11 +318,17 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
          vk.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
      }
  
@@ -571,7 +597,7 @@ index 8aeb13a..166c172 100644
      for mesh in &app.meshes {
          let message = format!(
              "Geometries Group Transparent: {}, Cast Shadows: {}, Vertices: {} Triangles: {}",
-@@ -326,16 +350,19 @@ fn initialize_render(app: &mut Glim) {
+@@ -326,16 +351,19 @@ fn initialize_render(app: &mut Glim) {
  
      // upload lights
      if app.cpu_lights.len() > 0 {
@@ -601,7 +627,7 @@ index 8aeb13a..166c172 100644
  
          app.gpu_lights = Buffer::new(
              &app.vk,
-@@ -421,8 +448,17 @@ fn initialize_render(app: &mut Glim) {
+@@ -421,8 +449,17 @@ fn initialize_render(app: &mut Glim) {
          emissions.push(desc);
      }
  
@@ -621,7 +647,7 @@ index 8aeb13a..166c172 100644
  
      const STAGING_RESOLUTION: u64 = 1024;
      let mut staging_buffer = Buffer::empty(
-@@ -439,8 +475,10 @@ fn initialize_render(app: &mut Glim) {
+@@ -439,8 +476,10 @@ fn initialize_render(app: &mut Glim) {
      for index in 0..app.groups.len() {
          let group = &app.groups[index];
  
@@ -634,7 +660,7 @@ index 8aeb13a..166c172 100644
      }
  
      // free
-@@ -452,6 +490,7 @@ fn initialize_render(app: &mut Glim) {
+@@ -452,6 +491,7 @@ fn initialize_render(app: &mut Glim) {
  
      app.albedo_array = albedo_array;
      app.emission_array = emission_array;
@@ -642,7 +668,7 @@ index 8aeb13a..166c172 100644
  
      if app.light_cookies.len() == 0 {
          let dummy_cookie = TexturePixelsData {
-@@ -560,8 +599,14 @@ fn initialize_render(app: &mut Glim) {
+@@ -560,8 +600,14 @@ fn initialize_render(app: &mut Glim) {
          jitter_barycentrics: app.config.antialiasing as u32,
      };
  
@@ -658,11 +684,12 @@ index 8aeb13a..166c172 100644
      } else {
          render_lightmaps(app)
      }
-@@ -589,6 +634,97 @@ fn format_window_title(
+@@ -589,6 +635,98 @@ fn format_window_title(
      );
  }
  
 +fn apply_preview_updates(app: &mut Glim) {
++    preview_skybox::apply(app);
 +    preview_geometry::apply_updates(app);
 +    unsafe {
 +            if let Some(multiplier) = preview_updates::take_indirect() {
@@ -756,7 +783,7 @@ index 8aeb13a..166c172 100644
  fn render_preview(app: &mut Glim) {
      let window = app.window;
  
-@@ -630,7 +766,7 @@ fn render_preview(app: &mut Glim) {
+@@ -630,7 +768,7 @@ fn render_preview(app: &mut Glim) {
      let mut bake_complete_printed = false;
  
      unsafe {
@@ -765,7 +792,7 @@ index 8aeb13a..166c172 100644
              glfwPollEvents();
  
              Log::progress(
-@@ -669,6 +805,8 @@ fn render_preview(app: &mut Glim) {
+@@ -669,6 +807,8 @@ fn render_preview(app: &mut Glim) {
  
              update_camera(app, delta_time);
  
@@ -774,7 +801,7 @@ index 8aeb13a..166c172 100644
              if !app.preview_initialized {
                  app.preview_push_constants.sample_index = 0;
                  bake_start_time = std::time::Instant::now();
-@@ -726,72 +864,17 @@ fn render_preview(app: &mut Glim) {
+@@ -726,72 +866,17 @@ fn render_preview(app: &mut Glim) {
      }
  
      unsafe {
@@ -849,7 +876,7 @@ index 8aeb13a..166c172 100644
          if app.preview_push_constants.sample_index == 0 {
              update_visibility_from_camera(app, cmd);
              app.preview_initialized = true;
-@@ -822,20 +905,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+@@ -822,20 +907,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
  
          let diffuse = &mut app.render_target.diffuse;
  
@@ -881,7 +908,7 @@ index 8aeb13a..166c172 100644
  
          if app.preview_push_constants.sample_index < app.preview_push_constants.max_samples {
              let shader = &app.preview_shader;
-@@ -869,6 +949,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+@@ -869,6 +951,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
              app.preview_push_constants.sample_index += 1;
          }
  
@@ -954,7 +981,7 @@ index 8aeb13a..166c172 100644
          let swapchain_image = &app.vk.swapchain.frames[image_index as usize];
  
          let vk = &app.vk.device;
-@@ -1087,6 +1233,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
+@@ -1087,6 +1235,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
          let max_samples = app.config.direct_emission_samples;
          let bounce_count = app.config.bounce_count;
          app.preview_push_constants = PreviewPushConstants {
@@ -964,7 +991,7 @@ index 8aeb13a..166c172 100644
              lights_count: app.cpu_lights.len() as u32,
              sample_index: 0,
              width: width,
-@@ -1121,7 +1270,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
+@@ -1121,7 +1272,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
          r != 0 || g != 0 || b != 0
      }
  
@@ -973,7 +1000,7 @@ index 8aeb13a..166c172 100644
          let mut extract = |vertices: &[Vertex], indices: &[u32]| {
              for primitive_id in 0..(indices.len() / 3) {
                  let i0 = indices[primitive_id * 3 + 0] as usize;
-@@ -1218,11 +1367,15 @@ impl LightmapGroup {
+@@ -1218,11 +1369,15 @@ impl LightmapGroup {
  
  impl Glim {
      pub fn new(config: GlimConfig, output_dir: PathBuf) -> Glim {
@@ -990,7 +1017,7 @@ index 8aeb13a..166c172 100644
              window_extensions: Vec::new(),
          };
  
-@@ -1239,7 +1392,7 @@ impl Glim {
+@@ -1239,7 +1394,7 @@ impl Glim {
          let mut vk = VulkanContext::new(&vulkan_config, create_surface_callback);
          println!("Vulkan Initialized");
  
@@ -999,7 +1026,7 @@ index 8aeb13a..166c172 100644
              vk.create_swapchain(
                  config.preview_settings.width,
                  config.preview_settings.height,
-@@ -1264,6 +1417,9 @@ impl Glim {
+@@ -1264,6 +1419,9 @@ impl Glim {
          let gpu_lights = Buffer::null();
  
          let preview_push_constants = PreviewPushConstants {
@@ -1009,7 +1036,7 @@ index 8aeb13a..166c172 100644
              lights_count: 0,
              sample_index: 0,
              width: 0,
-@@ -1332,9 +1488,14 @@ impl Glim {
+@@ -1332,9 +1490,14 @@ impl Glim {
              vk,
              meshes,
              window: window,
@@ -1732,10 +1759,10 @@ index 0000000..3762f3f
 +}
 diff --git a/src/preview_embedded.rs b/src/preview_embedded.rs
 new file mode 100644
-index 0000000..100ca8e
+index 0000000..72e328b
 --- /dev/null
 +++ b/src/preview_embedded.rs
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,466 @@
 +use std::time::{Duration, Instant};
 +use ash::vk;
 +use ash::vk::Handle;
@@ -2047,6 +2074,50 @@ index 0000000..100ca8e
 +            let unlit = read(view);
 +            assert!(frame_generation.get() > old_generation, "Light edits did not invalidate OIDN");
 +            assert_eq!(denoised(view), unlit, "Old denoised lighting survived a light edit");
++            // Environment edits must invalidate lit surfaces, background and OIDN
++            // at the same camera revision. Intensity must not require a new cubemap.
++            use crate::preview_skybox::{app_update_preview_skybox, app_update_preview_skybox_intensity};
++            let wait_environment = |view: PreviewView, old_generation: u64| -> Vec<f32> {
++                let until = Instant::now() + Duration::from_secs(60);
++                loop {
++                    let frame = read(view);
++                    if frame_generation.get() > old_generation { return frame; }
++                    assert!(Instant::now() < until, "Skybox update did not reset accumulation");
++                }
++            };
++            let sky_blue: Vec<f32> = (0..6).flat_map(|_| [0.,0.,2.,1.]).collect();
++            let old_generation = frame_generation.get();
++            assert!(unsafe { app_update_preview_skybox(sky_blue.as_ptr(), 24, 1) });
++            assert!(app_update_preview_skybox_intensity(1.));
++            let environment_lit = wait_environment(view, old_generation);
++            assert!(environment_lit[center+2] > 0.1, "Skybox failed to illuminate geometry");
++            assert!(denoised(view)[center+2] > 0.1, "OIDN kept stale environment lighting");
++            view.origin.x = 100.; view.revision += 1;
++            assert!(app_update_preview_view(view));
++            let background = read(view);
++            assert!((background[2] - 2.).abs() < 0.01 && background[0] < 0.01);
++            // More updates than a destroy/reload implementation's 64-set pool can
++            // support. Respecializing must reuse layouts and descriptor sets.
++            for i in 0..24 {
++                let intensity = if i % 2 == 0 { 0.25 } else { 0.5 };
++                let old_generation = frame_generation.get();
++                assert!(app_update_preview_skybox_intensity(intensity));
++                let background = wait_environment(view, old_generation);
++                assert!((background[2] - 2.*intensity).abs() < 0.01, "Intensity update was not applied");
++            }
++            let sky_green: Vec<f32> = (0..24).flat_map(|_| [0.,4.,0.,1.]).collect();
++            let old_generation = frame_generation.get();
++            assert!(unsafe { app_update_preview_skybox(sky_green.as_ptr(), 96, 2) });
++            let background = wait_environment(view, old_generation);
++            assert!((background[1] - 2.).abs() < 0.01 && background[2] < 0.01, "Resized cubemap retained old bindings");
++            assert_eq!(denoised(view), background, "OIDN retained the old sky background");
++            let old_generation = frame_generation.get();
++            assert!(unsafe { app_update_preview_skybox([0f32;24].as_ptr(), 24, 1) });
++            assert!(app_update_preview_skybox_intensity(0.));
++            assert!(wait_environment(view, old_generation).chunks_exact(4).all(|p| p[..3].iter().all(|v| *v < 0.01)));
++            view.origin.x = -1.; view.revision += 1;
++            assert!(app_update_preview_view(view));
++            read(view);
 +            assert!(app_set_preview_denoise(false));
 +            // Delete every mesh, add two objects with distinct material groups,
 +            // then repeat. Exercise descriptor counts and empty BVH transitions.
@@ -2893,12 +2964,120 @@ index 0000000..c8e3567
 +    let hardware = Spirv::new(&load_shader_bytes(ShaderName::InitializePreview, true));
 +    assert!(hardware.0.iter().any(|(op, a)| *op == 71 && a[1] == 33 && a[2] == 0));
 +}
+diff --git a/src/preview_skybox.rs b/src/preview_skybox.rs
+new file mode 100644
+index 0000000..44cf639
+--- /dev/null
++++ b/src/preview_skybox.rs
+@@ -0,0 +1,102 @@
++//! Latest-only skybox snapshots; Vulkan resources stay on the render thread.
++use std::sync::Mutex;
++use ash::vk::Handle;
++use crate::{Glim, skybox::Skybox, shader::{ShaderBindings, update_compute_shader, respecialize_compute_shader}};
++
++struct Capture { pixels: Vec<f32>, resolution: u32 }
++
++#[derive(Default)]
++struct Updates { active: bool, capture: Option<Capture>, intensity: Option<f32> }
++
++fn expected_length(resolution: u32) -> Option<usize> {
++    (resolution > 0 && resolution <= 2048).then(|| resolution as usize * resolution as usize * 24)
++}
++
++impl Updates {
++    fn publish(&mut self, pixels: &[f32], resolution: u32) -> bool {
++        if !self.active || expected_length(resolution) != Some(pixels.len()) || pixels.iter().any(|v| !v.is_finite()) { return false; }
++        self.capture = Some(Capture { pixels: pixels.to_vec(), resolution });
++        true
++    }
++    fn publish_intensity(&mut self, value: f32) -> bool {
++        if !self.active || !value.is_finite() || value < 0. { return false; }
++        self.intensity = Some(value);
++        true
++    }
++}
++
++static UPDATES: Mutex<Updates> = Mutex::new(Updates { active: false, capture: None, intensity: None });
++
++pub fn reset(active: bool) {
++    *UPDATES.lock().unwrap_or_else(|e| e.into_inner()) = Updates { active, ..Default::default() };
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_update_preview_skybox(pixels: *const f32, length: u32, resolution: u32) -> bool {
++    if pixels.is_null() || expected_length(resolution) != Some(length as usize) { return false; }
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).publish(
++        unsafe { std::slice::from_raw_parts(pixels, length as usize) }, resolution)
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn app_update_preview_skybox_intensity(value: f32) -> bool {
++    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).publish_intensity(value)
++}
++
++pub fn apply(app: &mut Glim) {
++    let (capture, intensity) = {
++        let mut updates = UPDATES.lock().unwrap_or_else(|e| e.into_inner());
++        (updates.capture.take(), updates.intensity.take())
++    };
++    let intensity = intensity.filter(|v| *v != app.config.skybox_intensity);
++    if capture.is_none() && intensity.is_none() { return; }
++    unsafe { app.vk.device.device_wait_idle().unwrap(); }
++    let mut old = capture.map(|capture| std::mem::replace(&mut app.skybox,
++        Skybox::new(&app.vk, capture.resolution, capture.resolution, &capture.pixels)));
++    if let Some(value) = intensity {
++        app.config.skybox_intensity = value;
++        app.constants.skybox_intensity = value;
++    }
++    // Replace every cached preview binding before releasing the previous cubemap.
++    let bindings = ShaderBindings {
++        tlas: app.tlas.acceleration_structure,
++        albedos: &app.albedo_array.views(), emissions: &app.emission_array.views(),
++        cookies: &app.cookie_array.views(), alphas: &app.alphas_array.views(),
++        skybox: app.skybox.view(), skybox_sampler: app.skybox.sampler(),
++        visibility: app.render_target.visibility.view(), preview_diffuse: app.render_target.diffuse.view(),
++        linear_sampler: app.linear_sampler,
++    };
++    for shader in [&mut app.init_from_camera_shader, &mut app.preview_shader, &mut app.preview_surface_shader] {
++        if shader.pipeline.is_null() { continue; }
++        if intensity.is_some() { respecialize_compute_shader(&app.vk, shader, &app.constants); }
++        update_compute_shader(&app.vk, shader, &bindings);
++    }
++    if let Some(old) = &mut old { old.destroy(&app.vk); }
++    app.preview_initialized = false;
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn preview_skybox_validates_and_coalesces_without_coupling_intensity_to_pixels() {
++        let mut updates = Updates::default();
++        assert!(!updates.publish(&[1.; 24], 1));
++        assert!(!updates.publish_intensity(1.));
++        updates.active = true;
++        for resolution in [0, 2049, u32::MAX] { assert!(!updates.publish(&[1.; 24], resolution)); }
++        assert!(!updates.publish(&[1.; 23], 1));
++        assert!(!updates.publish(&[f32::NAN; 24], 1));
++        for value in [-1., f32::NAN, f32::INFINITY] { assert!(!updates.publish_intensity(value)); }
++        assert!(updates.publish(&[1.; 24], 1));
++        assert!(updates.publish(&[2.; 96], 2));
++        assert!(updates.publish_intensity(1.));
++        assert!(updates.publish_intensity(0.5));
++        let capture = updates.capture.take().unwrap();
++        assert_eq!(capture.resolution, 2);
++        assert_eq!(capture.pixels, vec![2.; 96]);
++        assert_eq!(updates.intensity.take(), Some(0.5));
++        assert!(updates.publish_intensity(0.));
++        assert!(updates.capture.is_none(), "Intensity-only edits must not queue a cubemap");
++    }
++}
 diff --git a/src/preview_updates.rs b/src/preview_updates.rs
 new file mode 100644
-index 0000000..d6648dc
+index 0000000..45b462a
 --- /dev/null
 +++ b/src/preview_updates.rs
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,300 @@
 +use std::sync::Mutex;
 +use crate::{bindings::CoordinateSystem, lights::Light, math::{Vector2, Vector3}};
 +
@@ -2971,6 +3150,7 @@ index 0000000..d6648dc
 +static UPDATES: Mutex<Updates> = Mutex::new(Updates { active: false, pending: None, pending_indirect: None });
 +
 +pub fn reset(active: bool) {
++    crate::preview_skybox::reset(active);
 +    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).reset(active);
 +}
 +
@@ -3199,7 +3379,7 @@ index 0000000..d6648dc
 +}
 +
 diff --git a/src/shader.rs b/src/shader.rs
-index 9c30855..4845b3a 100644
+index 9c30855..82e6595 100644
 --- a/src/shader.rs
 +++ b/src/shader.rs
 @@ -2,6 +2,7 @@ use ash::vk::{self, Handle};
@@ -3261,7 +3441,21 @@ index 9c30855..4845b3a 100644
  
      ComputeShader::new(
          vk,
-@@ -483,4 +495,9 @@ pub struct PreviewPushConstants {
+@@ -279,6 +291,13 @@ pub fn load_compute_shader(
+     )
+ }
+ 
++pub fn respecialize_compute_shader(vk: &VulkanContext, shader: &mut ComputeShader, constants: &SpecializationConstants) {
++    let bytes = unsafe { std::slice::from_raw_parts(
++        (constants as *const SpecializationConstants).cast::<u8>(), size_of::<SpecializationConstants>()) };
++    let info = vk::SpecializationInfo::default().map_entries(&SPECIALIZATION_MAP_ENTRIES).data(bytes);
++    shader.respecialize(vk, &info);
++}
++
+ pub fn update_compute_shader(
+     vk: &VulkanContext,
+     shader: &ComputeShader,
+@@ -483,4 +502,9 @@ pub struct PreviewPushConstants {
      pub width: u32,
      pub height: u32,
      pub bounce_count: u32,
@@ -3271,6 +3465,19 @@ index 9c30855..4845b3a 100644
 +    pub pad: u32,
  }
 +const _: () = assert!(size_of::<PreviewPushConstants>() + 48 <= 128);
+diff --git a/src/skybox.rs b/src/skybox.rs
+index f6deea4..f1a3055 100644
+--- a/src/skybox.rs
++++ b/src/skybox.rs
+@@ -134,7 +134,7 @@ impl Skybox {
+             vk.cmd_pipeline_barrier(
+                 cmd,
+                 vk::PipelineStageFlags::TRANSFER,
+-                vk::PipelineStageFlags::FRAGMENT_SHADER,
++                vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                 vk::DependencyFlags::empty(),
+                 &[],
+                 &[],
 diff --git a/src/texture2d.rs b/src/texture2d.rs
 index a836d3a..ccc2a19 100644
 --- a/src/texture2d.rs

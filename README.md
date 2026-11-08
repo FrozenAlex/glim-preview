@@ -47,7 +47,7 @@ emission and material color, and reports unavailability in the overlay.
 ## Live updates and limits
 
 Baked/Mixed lights, their creation/deletion and settings, material emission,
-base colors/textures, existing object transforms, and the indirect multiplier
+base colors/textures, skybox settings, existing object transforms, and the indirect multiplier
 update live. Albedo and emission have separate change tracking: emission-only
 edits do not capture or upload albedo. Color edits on non-emissive materials only
 refresh albedo. Idle polling does not render atlases.
@@ -60,9 +60,18 @@ Only the affected group's changed atlas is rendered, read back asynchronously,
 and uploaded; each atlas is still a full 4-byte-per-texel transfer. Identical
 albedo pixels skip the native upload and accumulation reset.
 
+Skybox material swaps, exposure/tint/rotation, texture edits, and built-in procedural
+sun changes refresh the preview's environment lighting and background. Cubemap
+captures use asynchronous readback, a 0.35-second scan interval, and at most one
+skybox capture in flight. Unchanged settings do not recapture the skybox; environment
+lighting intensity updates without a cubemap capture or upload. Capture resolution
+follows Default Reflection Resolution up to 2048. Tracking uses the original scene's
+RenderSettings while that scene is active; time-driven shader animation is not
+continuously recaptured.
+
 Stop and reopen after adding, deleting, disabling, or replacing geometry, changing
-UV layouts or groups, changing alpha/cutout settings, changing the skybox, or
-introducing new cookie textures. Custom secondary shader inputs (such as detail
+UV layouts or groups, changing alpha/cutout settings, or introducing new cookie
+textures. Custom secondary shader inputs (such as detail
 layers or metallic settings), runtime MaterialPropertyBlock animation, and terrain
 materials are not monitored; restart the preview after changing those. Play mode entry and assembly reload stop the preview.
 

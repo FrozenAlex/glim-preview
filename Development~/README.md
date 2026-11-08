@@ -146,3 +146,33 @@ The Unity regression covers live color, Undo, base-texture edits, and zero atlas
 captures while idle; it also asserts emission edits do not recapture albedo and
 non-emissive color edits do not recapture emission. The GPU regression verifies
 reflected color and denoising on both ray-tracing paths without changing the camera.
+
+
+## Live skybox updates
+
+`PreviewSkybox` separately tracks the scene skybox material/texture inputs and
+`RenderSettings.ambientIntensity`. The initial export is unchanged. Subsequent
+cubemap captures render only the sky, read all six faces asynchronously, and queue
+one latest snapshot for the render thread. Capture resources are disposed on stop;
+non-finite HDR captures are discarded so a later corrected edit can be retried.
+The built-in procedural sky also observes its explicit or automatic directional sun.
+
+The renderer waits for in-flight work before replacing the cubemap, updates all
+cached preview descriptors, and resets accumulation/denoising. Intensity is an
+existing specialization constant: it recreates only the compute pipelines while
+reusing modules, layouts, and descriptor sets, avoiding exhaustion of upstream's
+64-set pool. Shader layouts, push-constant sizes, and Vulkan feature requirements
+remain unchanged. The skybox transfer barrier covers compute sampling as well as
+fragment sampling.
+
+Run the focused Unity regression with:
+
+```powershell
+./Development~/validate-unity.ps1 -Validation SkyboxValidation
+```
+
+It compares all six asynchronous faces against the initial export, then checks
+material/exposure/Undo/texture/resolution/removal/sun edits, idle and intensity-only
+capture exclusion, geometry preservation, and stopping with a pending readback.
+Native GPU tests cover lighting, background, OIDN, cubemap resizing, and 24 repeated
+intensity updates on both ray-tracing paths.
