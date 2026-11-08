@@ -22,6 +22,11 @@ denoising capture uses 16 bytes. Shader addresses use typed pointers, without a
 host values. Unit tests inspect compiled SPIR-V sizes, offsets, and capabilities
 so padding changes or accidental `Int64` requirements fail CI.
 
+Hardware and software ray tracing use separate compiled shader variants. The
+software variant omits `TopLevelAS` and ray-query code entirely, matching its
+descriptor layout and avoiding hardware-ray-tracing shader requirements. CI
+checks this in the generated SPIR-V for every software shader.
+
 ## Build
 
 With Rust/MSVC and `slangc` on PATH, run:
@@ -39,8 +44,7 @@ must remain unchanged.
 For GPU tests with Khronos validation installed, set `GLIM_PREVIEW_VALIDATE=1`
 before running the build script with `-GpuTests`. `GLIM_PREVIEW_GPU_MODE=hardware`
 or `software` selects one ray-tracing path; leaving it unset tests both. Validation
-errors fail the test. The current software path has a separate `TopLevelAS`
-descriptor-layout validation issue, recorded in `VALIDATION.md`.
+errors fail the test. Both paths pass with validation enabled; see `VALIDATION.md`.
 
 The DLL is not tracked in Git; its `.meta` file is tracked. For a new source
 checkout, close Unity and use `-OutputDirectory ./Editor` to install the build

@@ -1,5 +1,5 @@
 diff --git a/build.rs b/build.rs
-index b8712ff..35af251 100644
+index b8712ff..0063bcb 100644
 --- a/build.rs
 +++ b/build.rs
 @@ -14,6 +14,7 @@ fn main() {
@@ -10,11 +10,141 @@ index b8712ff..35af251 100644
  
      shaders.push(Shader {
          src: "initialize_preview.slang".into(),
-@@ -86,3 +87,4 @@ fn main() {
-         println!("spv_path: {:?}", spv_path);
+@@ -55,34 +56,23 @@ fn main() {
+         dst: "bake_shadowmask.spv".into(),
+     });
+ 
++    // A specialization constant does not remove the TLAS resource from the
++    // module interface. Compile a real software variant with no ray queries.
+     for shader in shaders {
+-        let shader_path = shader_dir.join(shader.src);
+-        let spv_path = out_dir.join(shader.dst);
+-
+-        let mut args = Vec::new();
+-
+-        args.push("-stage");
+-        args.push("compute");
+-        args.push("-entry");
+-        args.push("main");
+-
+-        let status = Command::new("slangc")
+-            .arg(shader_path.to_str().unwrap())
+-            .arg("-warnings-as-errors")
+-            .arg("all")
+-            .arg("-O3")
+-            .arg("-g0")
+-            .arg("-o")
+-            .arg(spv_path.to_str().unwrap())
+-            .args(["-target", "spirv"])
+-            .args(args)
+-            .status()
+-            .expect("Failed to run slangc");
+-
+-        if !status.success() {
+-            panic!("Slang compilation failed for {:?}", shader_path);
++        let shader_path = shader_dir.join(&shader.src);
++        for software in [false, true] {
++            let filename = if software { shader.dst.replace(".spv", ".software.spv") }
++                else { shader.dst.clone() };
++            let spv_path = out_dir.join(filename);
++            let mut command = Command::new("slangc");
++            command.arg(&shader_path)
++                .args(["-warnings-as-errors", "all", "-O3", "-g0", "-o"])
++                .arg(&spv_path)
++                .args(["-target", "spirv", "-stage", "compute", "-entry", "main"]);
++            if software { command.arg("-DGLIM_SOFTWARE_RT=1"); }
++            let status = command.status().expect("Failed to run slangc");
++            assert!(status.success(), "Slang compilation failed for {:?} (software: {})", shader_path, software);
++            println!("spv_path: {:?}", spv_path);
+         }
+-
+-        println!("spv_path: {:?}", spv_path);
      }
  }
+diff --git a/shaders/includes/bindings.slang b/shaders/includes/bindings.slang
+index b813e89..06a9ef8 100644
+--- a/shaders/includes/bindings.slang
++++ b/shaders/includes/bindings.slang
+@@ -4,8 +4,10 @@
+ #include "mesh.slang"
+ #include "sh.slang"
+ 
++#if !defined(GLIM_SOFTWARE_RT)
+ [[vk::binding(0, 0)]]
+ RaytracingAccelerationStructure TopLevelAS;
++#endif
+ 
+ [[vk::binding(2, 0)]]
+ [[vk::image_format("rgba32f")]]
+diff --git a/shaders/includes/core.slang b/shaders/includes/core.slang
+index e1d91fb..e469043 100644
+--- a/shaders/includes/core.slang
++++ b/shaders/includes/core.slang
+@@ -254,6 +254,7 @@ uint GlobalPrimitiveID(uint group, uint geometryID, uint localPrimitiveID)
+     }
+ }
+ 
++#if !defined(GLIM_SOFTWARE_RT)
+ void QueryHandleAlpha<let T : uint>(inout RayQuery<T> query)
+ {
+     if (query.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE)
+@@ -277,8 +278,14 @@ void QueryHandleAlpha<let T : uint>(inout RayQuery<T> query)
+     }
+ }
+ 
++#endif
 +
+ bool TraceRay(Ray ray, out Hit hit)
+ {
++#if defined(GLIM_SOFTWARE_RT)
++    hit = {};
++    return BVHTraceRay(ray, hit, false, false);
++#else
+     hit = {};
+ 
+     if (HARDWARE_RT == 1)
+@@ -316,11 +323,16 @@ bool TraceRay(Ray ray, out Hit hit)
+     {
+         return BVHTraceRay(ray, hit, false, false);
+     }
++#endif
+ }
+ 
+ // exclude renderers with no shadow casting
+ bool TraceShadowRay(Ray ray)
+ {
++#if defined(GLIM_SOFTWARE_RT)
++    Hit hit = {};
++    return BVHTraceRay(ray, hit, true, false);
++#else
+     if (HARDWARE_RT == 1)
+     {
+         RayDesc rayDesc;
+@@ -344,11 +356,16 @@ bool TraceShadowRay(Ray ray)
+         Hit hit = {};
+         return BVHTraceRay(ray, hit, true, false);
+     }
++#endif
+ }
+ 
+ // includes renderers with no shadow casting
+ bool TraceAnyHit(Ray ray)
+ {
++#if defined(GLIM_SOFTWARE_RT)
++    Hit hit = {};
++    return BVHTraceRay(ray, hit, true, true);
++#else
+     if (HARDWARE_RT == 1)
+     {
+         RayDesc rayDesc;
+@@ -372,6 +389,7 @@ bool TraceAnyHit(Ray ray)
+         Hit hit = {};
+         return BVHTraceRay(ray, hit, true, true);
+     }
++#endif
+ }
+ 
+ float CalculateTriangleArea(uint primitiveID)
 diff --git a/shaders/initialize_preview.slang b/shaders/initialize_preview.slang
 index a9dacc4..19c6d06 100644
 --- a/shaders/initialize_preview.slang
@@ -2529,10 +2659,10 @@ index 0000000..6f405b2
 +}
 diff --git a/src/preview_shader_contract.rs b/src/preview_shader_contract.rs
 new file mode 100644
-index 0000000..1ccca71
+index 0000000..c8e3567
 --- /dev/null
 +++ b/src/preview_shader_contract.rs
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,138 @@
 +//! Inspect the actual compiled SPIR-V, not just the matching Rust declarations.
 +use crate::{camera::InitializePreviewPushConstants, preview_denoise::SurfacePush,
 +    shader::{load_shader_bytes, PreviewPushConstants, ShaderName}};
@@ -2613,10 +2743,12 @@ index 0000000..1ccca71
 +        (ShaderName::Preview, size_of::<PreviewPushConstants>(), vec![0, 4, 8, 12, 16, 20, 24, 32, 36], 48),
 +        (ShaderName::PreviewSurface, size_of::<SurfacePush>(), vec![0, 8, 12], 48),
 +    ] {
-+        let spv = Spirv::new(&load_shader_bytes(name));
-+        assert_eq!(spv.offsets(spv.push_type()), offsets);
-+        assert_eq!(spv.bytes(spv.push_type()), size);
-+        assert!(size + reserve <= 128, "preview leaves no room for upstream push data");
++        for hardware in [false, true] {
++            let spv = Spirv::new(&load_shader_bytes(name, hardware));
++            assert_eq!(spv.offsets(spv.push_type()), offsets);
++            assert_eq!(spv.bytes(spv.push_type()), size);
++            assert!(size + reserve <= 128, "preview leaves no room for upstream push data");
++        }
 +    }
 +}
 +
@@ -2625,9 +2757,11 @@ index 0000000..1ccca71
 +    for name in [ShaderName::InitializePreview, ShaderName::Preview, ShaderName::PreviewSurface,
 +        ShaderName::BakeLightProbes, ShaderName::BakeDirectLight, ShaderName::BakeIndirect,
 +        ShaderName::BakeDirectEmission, ShaderName::AdjustSamples, ShaderName::ShadowMask] {
-+        let spv = Spirv::new(&load_shader_bytes(name));
-+        spv.assert_no_int64();
-+        assert!(spv.bytes(spv.push_type()) <= 128);
++        for hardware in [false, true] {
++            let spv = Spirv::new(&load_shader_bytes(name, hardware));
++            spv.assert_no_int64();
++            assert!(spv.bytes(spv.push_type()) <= 128);
++        }
 +    }
 +}
 +
@@ -2647,6 +2781,25 @@ index 0000000..1ccca71
 +    let floats: Vec<f32> = bytes.chunks_exact(4).map(|v| f32::from_ne_bytes(v.try_into().unwrap())).collect();
 +    let expected: Vec<f32> = vectors.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
 +    assert_eq!(floats, expected);
++}
++
++#[test]
++fn preview_software_modules_have_no_tlas_or_ray_query_requirement() {
++    for name in [ShaderName::InitializePreview, ShaderName::Preview, ShaderName::PreviewSurface,
++        ShaderName::BakeLightProbes, ShaderName::BakeDirectLight, ShaderName::BakeIndirect,
++        ShaderName::BakeDirectEmission, ShaderName::AdjustSamples, ShaderName::ShadowMask] {
++        let spv = Spirv::new(&load_shader_bytes(name, false));
++        for (op, args) in &spv.0 {
++            // OpDecorate Binding 0 is TopLevelAS in the fixed descriptor layout.
++            assert!(!(*op == 71 && args[1] == 33 && args[2] == 0), "software module declares TLAS binding 0");
++            assert!(!matches!(*op, 4472 | 5341), "software module contains a ray-query or acceleration-structure type");
++            if *op == 17 { assert!(!matches!(args[0], 4472 | 4479), "software module requires ray-tracing capabilities"); }
++        }
++    }
++    // Check that the selector still loads real hardware modules, not software
++    // for both modes (which could make a software-only regression test pass).
++    let hardware = Spirv::new(&load_shader_bytes(ShaderName::InitializePreview, true));
++    assert!(hardware.0.iter().any(|(op, a)| *op == 71 && a[1] == 33 && a[2] == 0));
 +}
 diff --git a/src/preview_updates.rs b/src/preview_updates.rs
 new file mode 100644
@@ -2954,10 +3107,18 @@ index 0000000..d6648dc
 +}
 +
 diff --git a/src/shader.rs b/src/shader.rs
-index 9c30855..91d75f6 100644
+index 9c30855..4845b3a 100644
 --- a/src/shader.rs
 +++ b/src/shader.rs
-@@ -10,6 +10,7 @@ pub enum ShaderName {
+@@ -2,6 +2,7 @@ use ash::vk::{self, Handle};
+ 
+ use crate::{as_bytes, compute_shader::ComputeShader, vulkan_context::VulkanContext};
+ 
++#[derive(Clone, Copy)]
+ pub enum ShaderName {
+     InitializePreview,
+     BakeLightProbes,
+@@ -10,20 +11,31 @@ pub enum ShaderName {
      BakeDirectEmission,
      Preview,
      AdjustSamples,
@@ -2965,15 +3126,50 @@ index 9c30855..91d75f6 100644
      ShadowMask,
  }
  
-@@ -21,6 +22,7 @@ pub fn load_shader_bytes(name: ShaderName) -> Vec<u32> {
-         ShaderName::BakeLightProbes => include_bytes!(concat!(env!("OUT_DIR"), "/bake_sh.spv")),
-         ShaderName::BakeIndirect => include_bytes!(concat!(env!("OUT_DIR"), "/bake_indirect.spv")),
-         ShaderName::Preview => include_bytes!(concat!(env!("OUT_DIR"), "/preview.spv")),
-+        ShaderName::PreviewSurface => include_bytes!(concat!(env!("OUT_DIR"), "/preview_surface.spv")),
-         ShaderName::BakeDirectLight => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_light.spv")),
-         ShaderName::BakeDirectEmission => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_emission.spv")),
-         ShaderName::ShadowMask => include_bytes!(concat!(env!("OUT_DIR"), "/bake_shadowmask.spv")),
-@@ -483,4 +485,9 @@ pub struct PreviewPushConstants {
+-pub fn load_shader_bytes(name: ShaderName) -> Vec<u32> {
++pub fn load_shader_bytes(name: ShaderName, hardware_rt: bool) -> Vec<u32> {
+     #[rustfmt::skip]
+-    let bytes: &'static [u8] = match name {
+-        ShaderName::InitializePreview => include_bytes!(concat!(env!("OUT_DIR"), "/initialize_preview.spv")),
+-        ShaderName::AdjustSamples => include_bytes!(concat!(env!("OUT_DIR"), "/adjust_samples.spv")),
+-        ShaderName::BakeLightProbes => include_bytes!(concat!(env!("OUT_DIR"), "/bake_sh.spv")),
+-        ShaderName::BakeIndirect => include_bytes!(concat!(env!("OUT_DIR"), "/bake_indirect.spv")),
+-        ShaderName::Preview => include_bytes!(concat!(env!("OUT_DIR"), "/preview.spv")),
+-        ShaderName::BakeDirectLight => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_light.spv")),
+-        ShaderName::BakeDirectEmission => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_emission.spv")),
+-        ShaderName::ShadowMask => include_bytes!(concat!(env!("OUT_DIR"), "/bake_shadowmask.spv")),
++    let bytes: &'static [u8] = match (name, hardware_rt) {
++        (ShaderName::InitializePreview, true) => include_bytes!(concat!(env!("OUT_DIR"), "/initialize_preview.spv")),
++        (ShaderName::InitializePreview, false) => include_bytes!(concat!(env!("OUT_DIR"), "/initialize_preview.software.spv")),
++        (ShaderName::AdjustSamples, true) => include_bytes!(concat!(env!("OUT_DIR"), "/adjust_samples.spv")),
++        (ShaderName::AdjustSamples, false) => include_bytes!(concat!(env!("OUT_DIR"), "/adjust_samples.software.spv")),
++        (ShaderName::BakeLightProbes, true) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_sh.spv")),
++        (ShaderName::BakeLightProbes, false) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_sh.software.spv")),
++        (ShaderName::BakeIndirect, true) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_indirect.spv")),
++        (ShaderName::BakeIndirect, false) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_indirect.software.spv")),
++        (ShaderName::Preview, true) => include_bytes!(concat!(env!("OUT_DIR"), "/preview.spv")),
++        (ShaderName::Preview, false) => include_bytes!(concat!(env!("OUT_DIR"), "/preview.software.spv")),
++        (ShaderName::PreviewSurface, true) => include_bytes!(concat!(env!("OUT_DIR"), "/preview_surface.spv")),
++        (ShaderName::PreviewSurface, false) => include_bytes!(concat!(env!("OUT_DIR"), "/preview_surface.software.spv")),
++        (ShaderName::BakeDirectLight, true) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_light.spv")),
++        (ShaderName::BakeDirectLight, false) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_light.software.spv")),
++        (ShaderName::BakeDirectEmission, true) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_emission.spv")),
++        (ShaderName::BakeDirectEmission, false) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_direct_emission.software.spv")),
++        (ShaderName::ShadowMask, true) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_shadowmask.spv")),
++        (ShaderName::ShadowMask, false) => include_bytes!(concat!(env!("OUT_DIR"), "/bake_shadowmask.software.spv")),
+     };
+ 
+     let aligned = bytes
+@@ -268,7 +280,7 @@ pub fn load_compute_shader(
+         size: push_constants_size as u32,
+     }];
+ 
+-    let bytes = load_shader_bytes(shader_name);
++    let bytes = load_shader_bytes(shader_name, constants.hardware_rt == 1);
+ 
+     ComputeShader::new(
+         vk,
+@@ -483,4 +495,9 @@ pub struct PreviewPushConstants {
      pub width: u32,
      pub height: u32,
      pub bounce_count: u32,

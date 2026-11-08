@@ -34,5 +34,18 @@ This change prepares the add-on payloads; it does not port the later upstream re
   validation errors, and `shaderInt64` still disabled. The layer was loaded only
   for the test through `VK_LAYER_PATH`, without a system-wide installation.
 - Validation of the software ray-tracing path exposed a separate missing
-  `TopLevelAS` descriptor binding (binding 0). It is outside this layout preparation
-  change; the optional validation run reports it as a failure instead of hiding it.
+  `TopLevelAS` descriptor binding (binding 0). This was resolved in the follow-up below.
+
+## Software descriptor-layout correction
+
+- Kept the same Glim 0.12.0 upstream revision and the prepared push-constant layouts.
+- Compiled separate hardware/software shader variants. Software modules exclude
+  the `TopLevelAS` declaration and ray-query code at compilation, instead of relying
+  on a specialization constant to make those resources unused.
+- Native tests: 19 passed. Both shader variants retain matching host layouts and
+  have no `Int64` requirement. Every software shader has no binding 0,
+  acceleration-structure/ray-query types, or ray-tracing capabilities.
+- The complete embedded GPU regression passed on both hardware and software paths
+  with Khronos validation 1.4.368 enabled and zero validation errors. Coverage
+  includes cameras, live lights/emission, transforms, resizing, denoising, scene
+  reuse, and shutdown. `shaderInt64` remains disabled.
