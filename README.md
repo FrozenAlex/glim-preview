@@ -98,7 +98,7 @@ post-processing package installed. See [development notes](Development~/README.m
 
 Update `package.json`'s version, commit and push, then run **Actions → Build Release**
 with **publish** enabled. Alternatively, push a matching version tag such as
-`v0.1.1`. Leaving **publish** disabled builds downloadable workflow artifacts only.
+`v0.1.2`. Leaving **publish** disabled builds downloadable workflow artifacts only.
 The workflow builds the patched Rust renderer on Windows and Ubuntu, packages
 both native libraries in one VPM ZIP, and publishes the ZIP, manifest,
 checksum, and signed build provenance bundle. The VPM listing checks for releases hourly; its **Build Repo Listing**
