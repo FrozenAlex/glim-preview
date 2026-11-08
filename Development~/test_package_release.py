@@ -49,6 +49,14 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertEqual(manifest["url"], f"https://github.com/FrozenAlex/glim-preview/releases/download/{tag}/{archive.name}")
         self.assertEqual((self.root / DLL).read_text(), "fixture")
 
+    def test_source_checkout_does_not_need_a_committed_dll(self):
+        (self.root / DLL).unlink()
+        archive, _ = self.build()
+        with zipfile.ZipFile(archive) as zip_file:
+            self.assertEqual(zip_file.read(DLL), self.native.read_bytes())
+            self.assertIn(DLL + ".meta", zip_file.namelist())
+        self.assertFalse((self.root / DLL).exists())
+
     def test_checksum_and_reproducibility(self):
         archive, _ = self.build()
         first = archive.read_bytes()

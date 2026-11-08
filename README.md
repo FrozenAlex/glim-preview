@@ -76,8 +76,13 @@ This package directory is the Git repository root. Unity loads `Editor/` directl
 when the repository is installed under a project's `Packages` directory.
 `Development~` contains build tools and tests; Unity ignores folders ending in `~`.
 
+Native DLLs are distributed in release packages and are not tracked in Git.
+For a source checkout, close Unity and build the DLL into `Editor/` before using
+the preview or running Unity validation. Its `.meta` file remains tracked to
+preserve the importer settings.
+
 ```powershell
-./Development~/build-native.ps1 -GpuTests
+./Development~/build-native.ps1 -OutputDirectory ./Editor -GpuTests
 ./Development~/validate-unity.ps1
 ```
 

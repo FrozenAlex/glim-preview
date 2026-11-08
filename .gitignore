@@ -9,3 +9,5 @@ dist/
 *.pdb
 *.pdb.meta
 __pycache__/
+# Native binaries are built locally or distributed in release packages.
+*.dll

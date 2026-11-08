@@ -27,6 +27,10 @@ directory at the repository root. Copy the result into `Editor/` with Unity clos
 if replacing the same loaded DLL. Preserve its `.meta` file. The upstream `glim.dll`
 must remain unchanged.
 
+The DLL is not tracked in Git; its `.meta` file is tracked. For a new source
+checkout, close Unity and use `-OutputDirectory ./Editor` to install the build
+directly. Release ZIPs already include the DLL built by GitHub Actions.
+
 ## Verify Scene View behavior
 
 ```powershell
