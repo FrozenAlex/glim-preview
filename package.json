@@ -1,6 +1,6 @@
 {
   "name": "com.frozenalex.glim-preview",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "displayName": "Glim Live Preview",
   "unity": "2022.3",
   "description": "Independent live path-traced Scene View preview for Glim 0.12, including scene color correction and HDR diagnostics.",
