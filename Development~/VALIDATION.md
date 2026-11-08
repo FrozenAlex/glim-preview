@@ -1,4 +1,4 @@
-# Validation Р Р†Р вЂљРІР‚Сњ 2026-11-08
+# Validation Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ 2026-11-08
 
 - Glim 0.12.0 plus the independent add-on compiled successfully against the project's Unity references.
 - Native preview unit tests: 15 passed. The embedded GPU test was run separately and also exercises OIDN; the standalone noisy-surface OIDN test was not rerun.
@@ -49,3 +49,20 @@ This change prepares the add-on payloads; it does not port the later upstream re
   with Khronos validation 1.4.368 enabled and zero validation errors. Coverage
   includes cameras, live lights/emission, transforms, resizing, denoising, scene
   reuse, and shutdown. `shaderInt64` remains disabled.
+
+
+## Live base-color and texture refresh (2026-11-09)
+
+- Native unit tests: 19 passed, including albedo buffer-size validation, mailbox
+  coalescing, initial/identical-pixel upload suppression, and inactive-session rejection.
+- The GPU regression passed both hardware and software ray tracing with Khronos
+  validation enabled and zero warnings/errors. Live albedo changed reflected light
+  and denoised color, preserved primary emission, and restored the original color
+  without moving the camera or rebuilding geometry.
+- The isolated Unity 2022.3 regression passed: red/blue base-color edits, Undo,
+  base-texture replacement/content edits, and existing display/transform/restart tests.
+- Capture counters verified zero albedo recaptures for emission-only edits, zero
+  emission recaptures for non-emissive color edits, and zero atlas captures while idle.
+- The test retains the Standard shader's neutral specular contribution when checking
+  color dominance. Shader property metadata is cached; GPU readback remains limited
+  to one atlas in flight at the existing 0.35-second polling interval.

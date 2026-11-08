@@ -19,7 +19,8 @@ namespace FrozenAlex.GlimPreview
         static SceneView view;
         static RenderTexture target;
         static Vector4 originalST;
-        static int stage, ticks, originalLitPixels;
+        static int stage, ticks, originalLitPixels, albedoCaptures, emissionCaptures;
+        static Texture2D albedoTexture;
         static Transform movingParent;
         static GameObject addedObject;
         static BakeContext snapshotContext;
@@ -121,6 +122,8 @@ namespace FrozenAlex.GlimPreview
                 if (!frame || PreviewViewport.Samples < 8) return;
                 var values = frame.GetPixels();
                 var center = values[(frame.height / 2) * frame.width + frame.width / 2];
+                if (stage >= 16 && stage <= 22 && ticks % 10 == 0)
+                    Debug.Log($"ALBEDO TEST: stage={stage} color={center} albedoCaptures={ReadMaterials().AlbedoCaptureCount} emissionCaptures={ReadMaterials().EmissionCaptureCount}");
                 if (stage == 0)
                 {
                     if (Mathf.Max(center.r, center.g, center.b) > 0.01f) throw new Exception("Initial emission was not black: " + center);
@@ -139,6 +142,8 @@ namespace FrozenAlex.GlimPreview
                 }
                 else if (stage == 2 && now > changedAt + 0.5 && center.g > 2 && center.r < 0.01f)
                 {
+                    if (ReadMaterials().AlbedoCaptureCount != 0)
+                        throw new Exception("Emission-only edits recaptured albedo");
                     CaptureComposite("viewport-green.png");
                     originalLitPixels = values.Count(c => c.g > 1);
                     grading.saturation.Override(-100);
@@ -270,6 +275,78 @@ namespace FrozenAlex.GlimPreview
                     AssertNoRebuild();
                     if (center.b < 3) throw new Exception("Disabling a renderer changed the geometry snapshot");
                     renderer.enabled = true;
+                    emitter = renderer.sharedMaterial;
+                    emitter.SetColor("_EmissionColor", Color.black);
+                    emitter.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
+                    emitter.SetFloat("_Glossiness", 0);
+                    emitter.color = Color.red;
+                    var light = new GameObject("Albedo test light").AddComponent<Light>();
+                    light.type = LightType.Directional;
+                    light.lightmapBakeType = LightmapBakeType.Baked;
+                    light.shadows = LightShadows.None;
+                    light.intensity = 4;
+                    stage = 16; changedAt = now;
+                }
+                else if (stage == 16 && now > changedAt + 0.5 && center.r > 0.1f && center.r > center.g * 4 && center.r > center.b * 4)
+                {
+                    AssertNoRebuild();
+                    CaptureComposite("viewport-albedo-red.png");
+                    albedoCaptures = ReadMaterials().AlbedoCaptureCount;
+                    emissionCaptures = ReadMaterials().EmissionCaptureCount;
+                    Undo.IncrementCurrentGroup();
+                    Undo.RecordObject(emitter, "Preview base color");
+                    emitter.color = Color.blue;
+                    Undo.FlushUndoRecordObjects();
+                    stage = 17; changedAt = now;
+                }
+                else if (stage == 17 && now > changedAt + 0.5 && center.b > 0.1f && center.b > center.r * 4 && center.b > center.g * 4)
+                {
+                    AssertNoRebuild();
+                    if (ReadMaterials().AlbedoCaptureCount <= albedoCaptures || ReadMaterials().EmissionCaptureCount != emissionCaptures)
+                        throw new Exception("Non-emissive base-color edit did not refresh only albedo");
+                    CaptureComposite("viewport-albedo-blue.png");
+                    Undo.PerformUndo();
+                    stage = 18; changedAt = now;
+                }
+                else if (stage == 18 && now > changedAt + 0.5 && center.r > 0.1f && center.r > center.g * 4 && center.r > center.b * 4)
+                {
+                    AssertNoRebuild();
+                    albedoCaptures = ReadMaterials().AlbedoCaptureCount;
+                    emissionCaptures = ReadMaterials().EmissionCaptureCount;
+                    stage = 19; changedAt = now;
+                }
+                else if (stage == 19 && now > changedAt + 1.2)
+                {
+                    if (ReadMaterials().AlbedoCaptureCount != albedoCaptures || ReadMaterials().EmissionCaptureCount != emissionCaptures)
+                        throw new Exception("Idle materials kept recapturing atlases");
+                    emitter.SetColor("_EmissionColor", new Color(0, 3, 0));
+                    emitter.globalIlluminationFlags = MaterialGlobalIlluminationFlags.BakedEmissive;
+                    EditorUtility.SetDirty(emitter);
+                    stage = 20; changedAt = now;
+                }
+                else if (stage == 20 && now > changedAt + 0.5 && center.g > 2)
+                {
+                    if (ReadMaterials().AlbedoCaptureCount != albedoCaptures)
+                        throw new Exception("Emission or material dirty flag invalidated albedo");
+                    emitter.SetColor("_EmissionColor", Color.black);
+                    emitter.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
+                    emitter.color = Color.white;
+                    albedoTexture = new Texture2D(1, 1, TextureFormat.RGBA32, false, true);
+                    albedoTexture.SetPixel(0, 0, Color.blue); albedoTexture.Apply();
+                    emitter.mainTexture = albedoTexture;
+                    stage = 21; changedAt = now;
+                }
+                else if (stage == 21 && now > changedAt + 0.5 && center.b > 0.1f && center.b > center.r * 4 && center.b > center.g * 4)
+                {
+                    AssertNoRebuild();
+                    albedoTexture.SetPixel(0, 0, Color.green); albedoTexture.Apply();
+                    stage = 22; changedAt = now;
+                }
+                else if (stage == 22 && now > changedAt + 0.5 && center.g > 0.1f && center.g > center.r * 4 && center.g > center.b * 4)
+                {
+                    AssertNoRebuild();
+                    CaptureComposite("viewport-albedo-texture-green.png");
+                    Debug.Log("ALBEDO TEST PASSED: color, Undo, texture update, idle and emission-only capture exclusion");
                     Bake.StopPreview();
                     stage = 4;
                 }
@@ -278,6 +355,9 @@ namespace FrozenAlex.GlimPreview
             }
             catch (Exception e) { Finish(e); }
         }
+
+        static PreviewMaterials ReadMaterials() =>
+            (PreviewMaterials)typeof(BakeContext).GetField("previewMaterials", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(ReadContext());
 
         static BakeContext ReadContext() =>
             (BakeContext)typeof(Bake).GetField("_context", BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
@@ -385,7 +465,7 @@ namespace FrozenAlex.GlimPreview
             Bake.StopPreview();
             if (error == null && renderer && renderer.GetComponentsInChildren<MeshRenderer>(true).Length != 1)
                 error = new Exception("Preview renderer copies were not cleaned up");
-            string result = error == null ? "PASS: HDR exposure and diagnostic bands, OIDN surface denoising with exact primary emission and HDR preservation, diagnostics bypass grading/opacity/denoising, live emission and color grading, movement/Undo, no automatic mesh rebuild, manual restart, baked UV preservation and copy cleanup." : error.ToString();
+            string result = error == null ? "PASS: HDR exposure and diagnostic bands, OIDN surface denoising with exact primary emission and HDR preservation, diagnostics bypass grading/opacity/denoising, live albedo/emission and color grading, color/texture/Undo updates, no idle captures or emission-triggered albedo captures, movement/Undo, no automatic mesh rebuild, manual restart, baked UV preservation and copy cleanup." : error.ToString();
             File.WriteAllText(Path.Combine(resultDir, "result.txt"), result);
             Debug.Log(result);
             EditorApplication.Exit(error == null ? 0 : 1);

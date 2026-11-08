@@ -495,7 +495,7 @@ index c3f6374..b2140e6 100644
  
      pub fn look_at(&mut self, target: Vector3) {
 diff --git a/src/lib.rs b/src/lib.rs
-index 8aeb13a..061b91d 100644
+index 8aeb13a..166c172 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -1,5 +1,14 @@
@@ -601,7 +601,7 @@ index 8aeb13a..061b91d 100644
  
          app.gpu_lights = Buffer::new(
              &app.vk,
-@@ -421,8 +448,16 @@ fn initialize_render(app: &mut Glim) {
+@@ -421,8 +448,17 @@ fn initialize_render(app: &mut Glim) {
          emissions.push(desc);
      }
  
@@ -610,6 +610,7 @@ index 8aeb13a..061b91d 100644
 +    if app.config.is_preview {
 +        preview_bridge::register_emissions(app.groups.iter().map(|g|
 +            g.settings.width as usize * g.settings.height as usize * 4).collect());
++        preview_bridge::register_albedos(app.groups.iter().map(|g| g.albedo_pixels.as_slice()));
 +    }
 +    let mut albedo_array = if app.config.is_preview {
 +        TextureArray::new_reusing(&app.vk, albedos, &app.preview_reuse_groups, &mut app.albedo_array)
@@ -620,7 +621,7 @@ index 8aeb13a..061b91d 100644
  
      const STAGING_RESOLUTION: u64 = 1024;
      let mut staging_buffer = Buffer::empty(
-@@ -439,8 +474,10 @@ fn initialize_render(app: &mut Glim) {
+@@ -439,8 +475,10 @@ fn initialize_render(app: &mut Glim) {
      for index in 0..app.groups.len() {
          let group = &app.groups[index];
  
@@ -633,7 +634,7 @@ index 8aeb13a..061b91d 100644
      }
  
      // free
-@@ -452,6 +489,7 @@ fn initialize_render(app: &mut Glim) {
+@@ -452,6 +490,7 @@ fn initialize_render(app: &mut Glim) {
  
      app.albedo_array = albedo_array;
      app.emission_array = emission_array;
@@ -641,7 +642,7 @@ index 8aeb13a..061b91d 100644
  
      if app.light_cookies.len() == 0 {
          let dummy_cookie = TexturePixelsData {
-@@ -560,8 +598,14 @@ fn initialize_render(app: &mut Glim) {
+@@ -560,8 +599,14 @@ fn initialize_render(app: &mut Glim) {
          jitter_barycentrics: app.config.antialiasing as u32,
      };
  
@@ -657,7 +658,7 @@ index 8aeb13a..061b91d 100644
      } else {
          render_lightmaps(app)
      }
-@@ -589,6 +633,88 @@ fn format_window_title(
+@@ -589,6 +634,97 @@ fn format_window_title(
      );
  }
  
@@ -717,11 +718,20 @@ index 8aeb13a..061b91d 100644
 +
 +    }
 +    let emissions = preview_bridge::take_emissions();
-+    if !emissions.is_empty() {
++    let albedos = preview_bridge::take_albedos();
++    if !emissions.is_empty() || !albedos.is_empty() {
 +        unsafe { app.vk.device.device_wait_idle().unwrap(); }
-+        let mut staging = Buffer::empty(&app.vk, "Preview emission upload".into(), 16 * 1024 * 1024,
++        let mut staging = Buffer::empty(&app.vk, "Preview material upload".into(), 16 * 1024 * 1024,
 +            vk::BufferUsageFlags::TRANSFER_SRC,
 +            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
++        for (group, pixels) in albedos {
++            if let Some(texture) = app.albedo_array.textures.get_mut(group as usize) {
++                if pixels.len() == texture.width() as usize * texture.height() as usize * 4 {
++                    texture.set_pixels(&app.vk, &pixels, &staging);
++                    app.preview_initialized = false;
++                }
++            }
++        }
 +        for (group, pixels) in emissions {
 +            if let Some(texture) = app.emission_array.textures.get_mut(group as usize) {
 +                if pixels.len() == texture.width() as usize * texture.height() as usize * 4 {
@@ -746,7 +756,7 @@ index 8aeb13a..061b91d 100644
  fn render_preview(app: &mut Glim) {
      let window = app.window;
  
-@@ -630,7 +756,7 @@ fn render_preview(app: &mut Glim) {
+@@ -630,7 +766,7 @@ fn render_preview(app: &mut Glim) {
      let mut bake_complete_printed = false;
  
      unsafe {
@@ -755,7 +765,7 @@ index 8aeb13a..061b91d 100644
              glfwPollEvents();
  
              Log::progress(
-@@ -669,6 +795,8 @@ fn render_preview(app: &mut Glim) {
+@@ -669,6 +805,8 @@ fn render_preview(app: &mut Glim) {
  
              update_camera(app, delta_time);
  
@@ -764,7 +774,7 @@ index 8aeb13a..061b91d 100644
              if !app.preview_initialized {
                  app.preview_push_constants.sample_index = 0;
                  bake_start_time = std::time::Instant::now();
-@@ -726,72 +854,17 @@ fn render_preview(app: &mut Glim) {
+@@ -726,72 +864,17 @@ fn render_preview(app: &mut Glim) {
      }
  
      unsafe {
@@ -786,7 +796,7 @@ index 8aeb13a..061b91d 100644
 -
 -    let vk = &app.vk.device;
 -
-     unsafe {
+-    unsafe {
 -        vk.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
 -        vk.reset_fences(&[frame.fence]).unwrap()
 -    }
@@ -830,7 +840,7 @@ index 8aeb13a..061b91d 100644
 -        layer_count: 1,
 -    };
 -
--    unsafe {
+     unsafe {
 -        vk.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
 -            .unwrap();
 -
@@ -839,7 +849,7 @@ index 8aeb13a..061b91d 100644
          if app.preview_push_constants.sample_index == 0 {
              update_visibility_from_camera(app, cmd);
              app.preview_initialized = true;
-@@ -822,20 +895,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+@@ -822,20 +905,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
  
          let diffuse = &mut app.render_target.diffuse;
  
@@ -871,7 +881,7 @@ index 8aeb13a..061b91d 100644
  
          if app.preview_push_constants.sample_index < app.preview_push_constants.max_samples {
              let shader = &app.preview_shader;
-@@ -869,6 +939,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
+@@ -869,6 +949,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
              app.preview_push_constants.sample_index += 1;
          }
  
@@ -944,7 +954,7 @@ index 8aeb13a..061b91d 100644
          let swapchain_image = &app.vk.swapchain.frames[image_index as usize];
  
          let vk = &app.vk.device;
-@@ -1087,6 +1223,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
+@@ -1087,6 +1233,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
          let max_samples = app.config.direct_emission_samples;
          let bounce_count = app.config.bounce_count;
          app.preview_push_constants = PreviewPushConstants {
@@ -954,7 +964,7 @@ index 8aeb13a..061b91d 100644
              lights_count: app.cpu_lights.len() as u32,
              sample_index: 0,
              width: width,
-@@ -1121,7 +1260,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
+@@ -1121,7 +1270,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
          r != 0 || g != 0 || b != 0
      }
  
@@ -963,7 +973,7 @@ index 8aeb13a..061b91d 100644
          let mut extract = |vertices: &[Vertex], indices: &[u32]| {
              for primitive_id in 0..(indices.len() / 3) {
                  let i0 = indices[primitive_id * 3 + 0] as usize;
-@@ -1218,11 +1357,15 @@ impl LightmapGroup {
+@@ -1218,11 +1367,15 @@ impl LightmapGroup {
  
  impl Glim {
      pub fn new(config: GlimConfig, output_dir: PathBuf) -> Glim {
@@ -980,7 +990,7 @@ index 8aeb13a..061b91d 100644
              window_extensions: Vec::new(),
          };
  
-@@ -1239,7 +1382,7 @@ impl Glim {
+@@ -1239,7 +1392,7 @@ impl Glim {
          let mut vk = VulkanContext::new(&vulkan_config, create_surface_callback);
          println!("Vulkan Initialized");
  
@@ -989,7 +999,7 @@ index 8aeb13a..061b91d 100644
              vk.create_swapchain(
                  config.preview_settings.width,
                  config.preview_settings.height,
-@@ -1264,6 +1407,9 @@ impl Glim {
+@@ -1264,6 +1417,9 @@ impl Glim {
          let gpu_lights = Buffer::null();
  
          let preview_push_constants = PreviewPushConstants {
@@ -999,7 +1009,7 @@ index 8aeb13a..061b91d 100644
              lights_count: 0,
              sample_index: 0,
              width: 0,
-@@ -1332,9 +1478,14 @@ impl Glim {
+@@ -1332,9 +1488,14 @@ impl Glim {
              vk,
              meshes,
              window: window,
@@ -1165,12 +1175,12 @@ index c7a1d8c..a55185f 100644
      }
 diff --git a/src/preview_bridge.rs b/src/preview_bridge.rs
 new file mode 100644
-index 0000000..3fc8792
+index 0000000..fa8ad22
 --- /dev/null
 +++ b/src/preview_bridge.rs
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,306 @@
 +//! Owned, bounded mailboxes between the Unity thread and the Vulkan thread.
-+use std::{collections::BTreeMap, sync::Mutex};
++use std::{collections::{BTreeMap, hash_map::DefaultHasher}, hash::Hasher, sync::Mutex};
 +use crate::{camera::InitializePreviewPushConstants, math::Vector3};
 +
 +#[repr(C)]
@@ -1218,6 +1228,8 @@ index 0000000..3fc8792
 +    view: Option<PreviewView>,
 +    emission_sizes: Vec<usize>,
 +    emissions: BTreeMap<u32, Vec<u8>>,
++    albedos: BTreeMap<u32, Vec<u8>>,
++    albedo_hashes: Vec<Option<u64>>,
 +    frame: Option<Frame>,
 +    generation: u64,
 +    denoise: bool,
@@ -1228,7 +1240,7 @@ index 0000000..3fc8792
 +
 +static BRIDGE: Mutex<Bridge> = Mutex::new(Bridge {
 +    active: false, embedded: false, view: None, emission_sizes: Vec::new(),
-+    emissions: BTreeMap::new(), frame: None,
++    emissions: BTreeMap::new(), albedos: BTreeMap::new(), albedo_hashes: Vec::new(), frame: None,
 +    generation: 0, denoise: false, denoise_epoch: 0, denoise_status: 0, denoised: None,
 +});
 +
@@ -1238,9 +1250,42 @@ index 0000000..3fc8792
 +
 +pub fn register_emissions(sizes: Vec<usize>) {
 +    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    bridge.albedo_hashes = vec![None; sizes.len()];
++    bridge.albedos.clear();
 +    bridge.emission_sizes = sizes;
 +    bridge.emissions.clear();
 +    bridge.frame = None;
++}
++
++fn atlas_hash(pixels: &[u8]) -> u64 {
++    let mut hasher = DefaultHasher::new();
++    hasher.write(pixels);
++    hasher.finish()
++}
++
++pub fn register_albedos<'a>(pixels: impl Iterator<Item = &'a [u8]>) {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    bridge.albedo_hashes = pixels.map(|data| (!data.is_empty()).then(|| atlas_hash(data))).collect();
++}
++
++pub fn take_albedos() -> BTreeMap<u32, Vec<u8>> {
++    std::mem::take(&mut BRIDGE.lock().unwrap_or_else(|e| e.into_inner()).albedos)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn app_update_preview_albedo(group: u32, pixels: *const u8, length: u32) -> bool {
++    let mut bridge = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
++    if !bridge.active || pixels.is_null() || length == 0 ||
++        bridge.emission_sizes.get(group as usize).copied() != Some(length as usize) { return false; }
++    let data = unsafe { std::slice::from_raw_parts(pixels, length as usize) };
++    let hash = atlas_hash(data);
++    if bridge.albedo_hashes[group as usize] != Some(hash) {
++        // Suppress uploads and accumulation resets when changed inputs produced
++        // identical META pixels. Retain one latest owned snapshot per group.
++        bridge.albedos.insert(group, data.to_vec());
++        bridge.albedo_hashes[group as usize] = Some(hash);
++    }
++    true
 +}
 +
 +pub fn take_emissions() -> BTreeMap<u32, Vec<u8>> {
@@ -1387,6 +1432,22 @@ index 0000000..3fc8792
 +        }
 +        assert_eq!(take_emissions().len(), 2);
 +        assert!(take_emissions().is_empty());
++        register_albedos([&[0u8; 4][..], &[0u8; 8][..]].into_iter());
++        unsafe {
++            assert!(!app_update_preview_albedo(0, pixels.as_ptr(), 8));
++            assert!(!app_update_preview_albedo(2, pixels.as_ptr(), 8));
++            assert!(!app_update_preview_albedo(0, std::ptr::null(), 4));
++            assert!(app_update_preview_albedo(0, [0u8; 4].as_ptr(), 4));
++            assert!(take_albedos().is_empty(), "Initial atlas should not be uploaded again");
++            assert!(app_update_preview_albedo(0, pixels.as_ptr(), 4));
++            assert!(app_update_preview_albedo(0, [2u8; 4].as_ptr(), 4));
++            assert!(app_update_preview_albedo(1, pixels.as_ptr(), 8));
++            let updates = take_albedos();
++            assert_eq!(updates.len(), 2);
++            assert_eq!(updates[&0], vec![2u8; 4], "Latest edit must replace earlier pending pixels");
++            assert!(app_update_preview_albedo(0, [2u8; 4].as_ptr(), 4));
++            assert!(take_albedos().is_empty(), "Unchanged albedo must not reset accumulation");
++        }
 +        publish_frame(Frame { revision: 7, generation: 0, samples: 3, pixels: pixels.to_vec() });
 +        let mut dst = [0u8; 8];
 +        unsafe {
@@ -1418,7 +1479,10 @@ index 0000000..3fc8792
 +        begin_generation(3);
 +        unsafe { assert_eq!(app_copy_preview_denoised(dst.as_mut_ptr(), 8, 7, 2), 0); }
 +        reset(false, false);
-+        unsafe { assert!(!app_update_preview_emission(0, pixels.as_ptr(), 4)); }
++        unsafe {
++            assert!(!app_update_preview_emission(0, pixels.as_ptr(), 4));
++            assert!(!app_update_preview_albedo(0, pixels.as_ptr(), 4));
++        }
 +    }
 +}
 diff --git a/src/preview_denoise.rs b/src/preview_denoise.rs
@@ -1668,10 +1732,10 @@ index 0000000..3762f3f
 +}
 diff --git a/src/preview_embedded.rs b/src/preview_embedded.rs
 new file mode 100644
-index 0000000..039793b
+index 0000000..100ca8e
 --- /dev/null
 +++ b/src/preview_embedded.rs
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,422 @@
 +use std::time::{Duration, Instant};
 +use ash::vk;
 +use ash::vk::Handle;
@@ -1950,6 +2014,34 @@ index 0000000..039793b
 +            let center = 4*(view.width as usize*(view.height as usize/2)+view.width as usize/2);
 +            assert!(lit[center+1] > 1., "Test surface has no reflected HDR illumination");
 +            assert!(filtered[center+1] > 1. && filtered.iter().all(|v| v.is_finite()), "Surface lighting lost HDR in OIDN");
++            // Albedo-only edits must change reflected light and denoised color
++            // without rebuilding geometry, altering emission, or changing the camera.
++            let green_albedo: Vec<u8> = (0..16).flat_map(|_| [0,255,0,255]).collect();
++            assert!(unsafe { app_update_preview_albedo(0, green_albedo.as_ptr(), 64) });
++            let old_generation = frame_generation.get();
++            let until = Instant::now() + Duration::from_secs(60);
++            let green_lit = loop {
++                let frame = read(view);
++                if frame_generation.get() > old_generation { break frame; }
++                assert!(Instant::now() < until, "Albedo edit did not reset accumulation");
++            };
++            assert!(green_lit[center+1] > 1. && green_lit[center+2] < 0.01,
++                "Albedo edit did not recolor reflected light");
++            assert!((green_lit[center] - (lit[center] - lit[center+2])).abs() < 0.01, "Albedo edit changed primary emission: before {:?}, after {:?}", &lit[center..center+3], &green_lit[center..center+3]);
++            let green_filtered = denoised(view);
++            assert!(green_filtered[center+1] > 1. && green_filtered[center+2] < 0.01,
++                "Denoising retained the old albedo");
++            assert!(unsafe { app_update_preview_albedo(0, white.as_ptr(), 64) });
++            let old_generation = frame_generation.get();
++            let until = Instant::now() + Duration::from_secs(60);
++            loop {
++                let frame = read(view);
++                if frame_generation.get() > old_generation {
++                    assert!(frame[center+2] > 1., "Restoring albedo did not restore reflected blue");
++                    break;
++                }
++                assert!(Instant::now() < until, "Albedo restore did not reset accumulation");
++            }
 +            let old_generation = frame_generation.get();
 +            assert!(unsafe { crate::preview_updates::app_update_preview_lights(std::ptr::null(), 0) });
 +            let unlit = read(view);

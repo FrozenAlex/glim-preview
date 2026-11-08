@@ -191,6 +191,10 @@ namespace FrozenAlex.GlimPreview
         public static extern bool app_update_preview_emission(uint group, [In] byte[] pixels, uint length);
 
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool app_update_preview_albedo(uint group, [In] byte[] pixels, uint length);
+
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint app_copy_preview_frame([Out] byte[] pixels, uint capacity, uint revision);
 
         [DllImport(DLL_NAME)]

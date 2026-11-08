@@ -47,14 +47,24 @@ emission and material color, and reports unavailability in the overlay.
 ## Live updates and limits
 
 Baked/Mixed lights, their creation/deletion and settings, material emission,
-existing object transforms, and the indirect multiplier update live. Material
-changes recapture the affected emission atlas through asynchronous CPU readback
-and upload it to the add-on's Vulkan renderer. This is still a full-atlas transfer.
+base colors/textures, existing object transforms, and the indirect multiplier
+update live. Albedo and emission have separate change tracking: emission-only
+edits do not capture or upload albedo. Color edits on non-emissive materials only
+refresh albedo. Idle polling does not render atlases.
+
+Albedo tracking covers `_Color`, `_BaseColor`, `_MainTex`, `_BaseMap`, and shader
+properties marked `[MainColor]` or `[MainTexture]`, including texture tiling,
+offset, and content updates. The shader's META pass supplies the actual pixels.
+Updates share the existing 0.35-second scan interval and one-atlas-in-flight limit.
+Only the affected group's changed atlas is rendered, read back asynchronously,
+and uploaded; each atlas is still a full 4-byte-per-texel transfer. Identical
+albedo pixels skip the native upload and accumulation reset.
 
 Stop and reopen after adding, deleting, disabling, or replacing geometry, changing
-UV layouts or groups, changing albedo/alpha, changing the skybox, or introducing
-new cookie textures. Runtime MaterialPropertyBlock animation and terrain emission
-are not monitored. Play mode entry and assembly reload stop the preview.
+UV layouts or groups, changing alpha/cutout settings, changing the skybox, or
+introducing new cookie textures. Custom secondary shader inputs (such as detail
+layers or metallic settings), runtime MaterialPropertyBlock animation, and terrain
+materials are not monitored; restart the preview after changing those. Play mode entry and assembly reload stop the preview.
 
 The color-correction integration targets the built-in render pipeline used by this
 project; URP/HDRP compositing is not implemented. Preview UVs are packed on hidden

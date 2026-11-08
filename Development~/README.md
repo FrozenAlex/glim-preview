@@ -65,7 +65,7 @@ directly. Release ZIPs include the native libraries built by GitHub Actions.
 This creates an isolated project containing both packages and PPv2, then runs the
 actual Scene View regression. `-UnityProject` selects the host Unity project when this checkout is outside its Packages folder. `-AddonPackage` can select a staged add-on.
 The command returns the test process, project, log, and result paths. The harness
-exits Unity when complete. It covers live emission, HDR, scene desaturation,
+exits Unity when complete. It covers live albedo and emission, HDR, scene desaturation,
 False Color, Highlights, denoising, transforms/Undo, restart behavior, and baked UV
 and temporary-renderer preservation. It does not open or save the host scene.
 
@@ -114,3 +114,25 @@ Its listing workflow refreshes hourly, on source changes, or manually. Scheduled
 runs can be delayed by GitHub, and inactive public repositories can have schedules
 disabled after 60 days. No cross-repository token or extra repository secret is
 required. After publishing, run **Build Repo Listing** there for an immediate update.
+
+## Live albedo updates
+
+`PreviewMaterials` caches each shader's base-color/base-texture property IDs and
+compares their values separately from emission's material CRC. Material dirty
+counts and emission flags do not invalidate albedo. Non-emissive materials are
+excluded from the emission signature. One shared 0.35-second scanner schedules
+at most one atlas readback at a time, coalescing rapid edits without increasing
+the existing transfer concurrency. Geometry validity is checked only for dirty
+captures, rather than on every idle scan.
+
+`app_update_preview_albedo` validates the group and buffer size, copies the latest
+snapshot into a bounded mailbox, and ignores identical pixel fingerprints. The
+renderer updates the existing albedo image using the same staging/upload barrier
+path as emission, resets accumulation, and invalidates denoised output. Initial
+atlas fingerprints avoid redundant uploads without retaining full CPU textures.
+The new native export requires rebuilding the add-on library with this patch.
+
+The Unity regression covers live color, Undo, base-texture edits, and zero atlas
+captures while idle; it also asserts emission edits do not recapture albedo and
+non-emissive color edits do not recapture emission. The GPU regression verifies
+reflected color and denoising on both ray-tracing paths without changing the camera.
