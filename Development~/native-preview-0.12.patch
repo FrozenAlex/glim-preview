@@ -1,5 +1,5 @@
 diff --git a/build.rs b/build.rs
-index b8712ff..0063bcb 100644
+index b8712ff6c4ad1082c47883acd8dc9bbd57fd9592..0063bcb6b00b3423695a7a71cf7690d7ee6889b5 100644
 --- a/build.rs
 +++ b/build.rs
 @@ -14,6 +14,7 @@ fn main() {
@@ -62,10 +62,10 @@ index b8712ff..0063bcb 100644
      }
  }
 diff --git a/shaders/includes/bindings.slang b/shaders/includes/bindings.slang
-index b813e89..06a9ef8 100644
+index 68a0d7c676d456bd1575f56c44ebe0bc5d6a055b..61baa86b01a08a584c725fa4ecd4e070dfb07ac5 100644
 --- a/shaders/includes/bindings.slang
 +++ b/shaders/includes/bindings.slang
-@@ -4,8 +4,10 @@
+@@ -5,8 +5,10 @@
  #include "mesh.slang"
  #include "sh.slang"
  
@@ -77,10 +77,10 @@ index b813e89..06a9ef8 100644
  [[vk::binding(2, 0)]]
  [[vk::image_format("rgba32f")]]
 diff --git a/shaders/includes/core.slang b/shaders/includes/core.slang
-index e1d91fb..e469043 100644
+index 0584fda8d7633fe83f827255c864748aafbf1887..524679e4b5fec8b8c4659e35c2067c5dd9ed906a 100644
 --- a/shaders/includes/core.slang
 +++ b/shaders/includes/core.slang
-@@ -254,6 +254,7 @@ uint GlobalPrimitiveID(uint group, uint geometryID, uint localPrimitiveID)
+@@ -259,6 +259,7 @@ uint GlobalPrimitiveID(uint group, uint geometryID, uint localPrimitiveID)
      }
  }
  
@@ -88,7 +88,7 @@ index e1d91fb..e469043 100644
  void QueryHandleAlpha<let T : uint>(inout RayQuery<T> query)
  {
      if (query.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE)
-@@ -277,8 +278,14 @@ void QueryHandleAlpha<let T : uint>(inout RayQuery<T> query)
+@@ -282,8 +283,14 @@ void QueryHandleAlpha<let T : uint>(inout RayQuery<T> query)
      }
  }
  
@@ -103,7 +103,7 @@ index e1d91fb..e469043 100644
      hit = {};
  
      if (HARDWARE_RT == 1)
-@@ -316,11 +323,16 @@ bool TraceRay(Ray ray, out Hit hit)
+@@ -321,11 +328,16 @@ bool TraceRay(Ray ray, out Hit hit)
      {
          return BVHTraceRay(ray, hit, false, false);
      }
@@ -120,7 +120,7 @@ index e1d91fb..e469043 100644
      if (HARDWARE_RT == 1)
      {
          RayDesc rayDesc;
-@@ -344,11 +356,16 @@ bool TraceShadowRay(Ray ray)
+@@ -349,11 +361,16 @@ bool TraceShadowRay(Ray ray)
          Hit hit = {};
          return BVHTraceRay(ray, hit, true, false);
      }
@@ -137,7 +137,7 @@ index e1d91fb..e469043 100644
      if (HARDWARE_RT == 1)
      {
          RayDesc rayDesc;
-@@ -372,6 +389,7 @@ bool TraceAnyHit(Ray ray)
+@@ -377,6 +394,7 @@ bool TraceAnyHit(Ray ray)
          Hit hit = {};
          return BVHTraceRay(ray, hit, true, true);
      }
@@ -146,28 +146,33 @@ index e1d91fb..e469043 100644
  
  float CalculateTriangleArea(uint primitiveID)
 diff --git a/shaders/initialize_preview.slang b/shaders/initialize_preview.slang
-index a9dacc4..19c6d06 100644
+index 09de4f99fc4e8ed37748e8b4e8ceee7bf6495886..f18da9a824de7582f057d0ffb25d4f222788c418 100644
 --- a/shaders/initialize_preview.slang
 +++ b/shaders/initialize_preview.slang
-@@ -7,11 +7,13 @@ PushConstants Push;
- 
+@@ -8,15 +8,15 @@ PushConstants Push;
  struct PushConstants
  {
+     RayTracingData rt;
++    uint2 resolution;
+ 
 -    float3 cameraPosition;
 -    float fov;
+-    float3 cameraDirection;
+-    float pad0;
 +    // std430 scalar-array stride is 4 bytes: six vectors occupy 72, not 96.
 +    float rays[18];
 +}
  
--    float3 cameraDirection;
--    float pad0;
+-    uint2 resolution;
+-    float pad1;
+-    float pad2;
 +float3 CameraVector(uint offset)
 +{
 +    return float3(Push.rays[offset], Push.rays[offset + 1], Push.rays[offset + 2]);
  }
  
  [shader("compute")]
-@@ -28,22 +30,10 @@ void main(uint3 threadID: SV_DispatchThreadID)
+@@ -32,22 +32,10 @@ void main(uint3 threadID: SV_DispatchThreadID)
          return;
      }
  
@@ -194,36 +199,26 @@ index a9dacc4..19c6d06 100644
      ray.tMax = RAY_MAX;
  
 diff --git a/shaders/preview.slang b/shaders/preview.slang
-index 8b042a4..57ddf79 100644
+index 8403b946d88a19eaae10c933ef36377f6614b588..02f5ba219b547acecce99d2660aa7f4cc387ca3b 100644
 --- a/shaders/preview.slang
 +++ b/shaders/preview.slang
-@@ -13,6 +13,9 @@ struct PushConstants
-     uint width;
-     uint height;
-     uint bounceCount;
-+    Light* lights;
+@@ -15,6 +15,10 @@ struct PushConstants
+ 
+     uint2 resolution;
+     Light *lights;
 +    float indirectIntensity;
-+    uint pad;
++    uint pad0;
++    uint pad1;
++    uint pad2;
  };
  
  [shader("compute")]
-@@ -27,6 +30,10 @@ void main(uint3 threadID: SV_DispatchThreadID)
-         return;
-     }
- 
-+    float4 color = 0.0;
-+    float3 indirectColor = 0.0;
-+    float3 throughput = float3(1.0);
-+
-     float4 visibility = VisibilityBuffer[coords];
-     uint primitiveID = asuint(visibility.z);
-     if (primitiveID == uint::maxValue)
-@@ -44,14 +51,9 @@ void main(uint3 threadID: SV_DispatchThreadID)
+@@ -45,17 +49,13 @@ void main(uint3 threadID: SV_DispatchThreadID)
      uint3 indexing = BlueNoiseIndexing(pixelSeed, sampleIndex, ~0u, sampleCount, SamplingPattern::BlueNoiseFirst);
      uint dimension = 0;
  
--    float4 color = 0.0;
--    float3 throughput = float3(1.0);
+-    float4 color = float4(0.0, 0.0, 0.0, 1.0);
+-    float3 throughput = float3(1.0, 1.0, 1.0);
 -
      float3 emission = SampleEmission(surface.coords, surface.lightmapGroup).rgb;
 -    if (!surface.emissive)
@@ -233,17 +228,23 @@ index 8b042a4..57ddf79 100644
 +    // The current emission atlas is authoritative; cached mesh flags describe
 +    // only the material at export time and would prevent enabling emission live.
      float3 albedo = SampleAlbedo(surface.coords, surface.lightmapGroup).rgb;
-     color.rgb += emission;
-     throughput = albedo;
-@@ -66,9 +68,13 @@ void main(uint3 threadID: SV_DispatchThreadID)
+-    color.rgb += emission;
+-    throughput = albedo;
++    float4 color = float4(emission, 1.0);
++    float3 indirectColor = 0.0;
++    float3 throughput = albedo;
+ 
+     float3 positionWS = RayOffset(surface.P, surface.Ng);
+     float3 normalWS = surface.N;
+@@ -67,10 +67,13 @@ void main(uint3 threadID: SV_DispatchThreadID)
          for (uint lightIndex = 0; lightIndex < Push.lightCount; lightIndex++)
          {
              float3 L;
--            float3 current = ShadeLightDirect(Lights[lightIndex], positionWS, normalWS, xiLight, throughput, L, false);
--            float NoL = saturate(dot(L, normalWS));
--            color.rgb += current * NoL;
+-            Light light = Push.lights[lightIndex];
+-            float3 current = ShadeLightDirect(light, positionWS, normalWS, xiLight, throughput, L, false);
 +            float3 current = ShadeLightDirect(Push.lights[lightIndex], positionWS, normalWS, xiLight, throughput, L, false);
-+            float3 NoL = saturate(dot(L, normalWS));
+             float NoL = saturate(dot(L, normalWS));
+-            color.rgb += current * NoL;
 +            // The first surface receives direct light; later surfaces contribute GI.
 +            if (bounceIndex == 0)
 +                color.rgb += current * NoL;
@@ -252,7 +253,7 @@ index 8b042a4..57ddf79 100644
          }
  
          float2 xiBounce = SobolBurleySample2D(indexing.x, dimension++, indexing.y, indexing.z);
-@@ -95,21 +101,32 @@ void main(uint3 threadID: SV_DispatchThreadID)
+@@ -97,21 +100,32 @@ void main(uint3 threadID: SV_DispatchThreadID)
              }
  
              float3 bounceAlbedo = SampleAlbedo(surface.coords, surface.lightmapGroup).rgb;
@@ -290,10 +291,10 @@ index 8b042a4..57ddf79 100644
      previous.a = 1.0;
 diff --git a/shaders/preview_surface.slang b/shaders/preview_surface.slang
 new file mode 100644
-index 0000000..9f2cac5
+index 0000000000000000000000000000000000000000..57807e8490bd4f37fb7479d70e5a8e977eccf451
 --- /dev/null
 +++ b/shaders/preview_surface.slang
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,44 @@
 +#include "includes/core.slang"
 +
 +struct SurfaceSample
@@ -303,7 +304,13 @@ index 0000000..9f2cac5
 +    float4 normal;
 +    float4 emission;
 +};
-+struct PushConstants { SurfaceSample* output; uint width; uint height; }
++struct PushConstants
++{
++    RayTracingData rt;
++    SurfaceSample* output;
++    uint width;
++    uint height;
++}
 +[[vk::push_constant]] PushConstants Push;
 +
 +[shader("compute")]
@@ -333,10 +340,19 @@ index 0000000..9f2cac5
 +    Push.output[coords.y * Push.width + coords.x] = result;
 +}
 diff --git a/src/bindings.rs b/src/bindings.rs
-index 64c1702..e8450d2 100644
+index f106c9b513290bb724e03d26ed648984835685f5..e8450d235cb599653e8a171d50952178e8a97818 100644
 --- a/src/bindings.rs
 +++ b/src/bindings.rs
-@@ -227,16 +227,34 @@ pub extern "C" fn app_request_cancel() {
+@@ -216,8 +216,6 @@ fn handle_unwind_error(log_callback: LogCallback, err: Box<dyn Any + Send>) {
+ // Atomic bool so compiler can be happy
+ static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+ 
+-pub static LIGHT_UPDATE_REQUESTED: AtomicBool = AtomicBool::new(false);
+-
+ pub fn is_cancelled() -> bool {
+     CANCEL_REQUESTED.load(Ordering::Relaxed)
+ }
+@@ -229,16 +227,34 @@ pub extern "C" fn app_request_cancel() {
  
  #[unsafe(no_mangle)]
  pub extern "C" fn app_new(config: GlimConfig, output_dir: FfiString) -> *mut Glim {
@@ -372,7 +388,7 @@ index 64c1702..e8450d2 100644
              handle_unwind_error(config.log_callback, err);
              null_mut() as *mut Glim
          }
-@@ -260,7 +278,8 @@ pub extern "C" fn app_add_mesh(app: *mut Glim, mesh: FfiMesh) {
+@@ -262,7 +278,8 @@ pub extern "C" fn app_add_mesh(app: *mut Glim, mesh: FfiMesh) {
          }
  
          let target_mesh = &mut app.meshes[index];
@@ -382,7 +398,7 @@ index 64c1702..e8450d2 100644
          let emissive = mesh.emissive;
  
          let mut fix_seams = mesh.fix_seams;
-@@ -277,6 +296,15 @@ pub extern "C" fn app_add_mesh(app: *mut Glim, mesh: FfiMesh) {
+@@ -279,6 +296,15 @@ pub extern "C" fn app_add_mesh(app: *mut Glim, mesh: FfiMesh) {
              fix_seams,
              emissive,
          );
@@ -398,7 +414,7 @@ index 64c1702..e8450d2 100644
      }));
  
      if let Err(err) = result {
-@@ -293,13 +321,9 @@ pub extern "C" fn app_add_light(app: *mut Glim, mut light: Light) {
+@@ -295,48 +321,10 @@ pub extern "C" fn app_add_light(app: *mut Glim, mut light: Light) {
      let app = unsafe { &mut *app };
  
      let result = catch_unwind(AssertUnwindSafe(|| {
@@ -410,11 +426,46 @@ index 64c1702..e8450d2 100644
 -        light.direction = Vector3::ZERO - light.direction; // ??
 +        light.convert_coordinate_system(app.config.coordinate_system);
          light.shadow_radius_or_angle = light.shadow_radius_or_angle.max(0.0);
-+
-         app.cpu_lights.push(light);
+-        app.cpu_lights.push(light);
+-    }));
+-
+-    if let Err(err) = result {
+-        handle_unwind_error(app.config.log_callback, err);
+-    }
+-}
+-
+-#[unsafe(no_mangle)]
+-pub extern "C" fn app_clear_lights(app: *mut Glim) {
+-    if app.is_null() {
+-        return;
+-    }
+-
+-    let app = unsafe { &mut *app };
+ 
+-    let result = catch_unwind(AssertUnwindSafe(|| {
+-        app.cpu_lights.clear();
+-    }));
+-
+-    if let Err(err) = result {
+-        handle_unwind_error(app.config.log_callback, err);
+-    }
+-}
+-
+-#[unsafe(no_mangle)]
+-pub extern "C" fn app_upload_lights(app: *mut Glim) {
+-    if app.is_null() {
+-        return;
+-    }
+-
+-    let app = unsafe { &mut *app };
+-
+-    let result = catch_unwind(AssertUnwindSafe(|| {
+-        LIGHT_UPDATE_REQUESTED.store(true, Ordering::Relaxed);
++        app.cpu_lights.push(light);
      }));
  
-@@ -399,6 +423,10 @@ pub extern "C" fn app_run(app: *mut Glim) {
+     if let Err(err) = result {
+@@ -435,6 +423,10 @@ pub extern "C" fn app_run(app: *mut Glim) {
      let result = catch_unwind(AssertUnwindSafe(|| {
          initialize_render(app);
      }));
@@ -425,7 +476,7 @@ index 64c1702..e8450d2 100644
  
      if let Err(err) = result {
          handle_unwind_error(app.config.log_callback, err);
-@@ -481,6 +509,10 @@ pub extern "C" fn app_destroy(app: *mut Glim) {
+@@ -517,6 +509,10 @@ pub extern "C" fn app_destroy(app: *mut Glim) {
      let app = unsafe { &mut *app };
  
      let callback = app.config.log_callback;
@@ -437,56 +488,62 @@ index 64c1702..e8450d2 100644
      let result = catch_unwind(AssertUnwindSafe(|| {
          // Take ownership back from the pointer and let Box drop it
 diff --git a/src/camera.rs b/src/camera.rs
-index c3f6374..b2140e6 100644
+index 689e0d16bc06622aa2a38f0bbb8c75e2fc8fc6bf..68653af892d6cfbfed3a165414a15249484b8e38 100644
 --- a/src/camera.rs
 +++ b/src/camera.rs
-@@ -10,30 +10,34 @@ pub struct Camera {
+@@ -9,32 +9,39 @@ pub struct Camera {
+     pub last_cursor_pos: Option<(f64, f64)>,
  }
  
- #[repr(C)]
-+#[derive(Clone, Copy)]
- pub struct InitializePreviewPushConstants {
--    pub camera_position: Vector3,
--    pub fov_half_tan: f32,
+-#[repr(C, align(16))]
+-pub struct InitializePreviewPushConstants {
+-    pub rt: RayTracingData,
 -
--    pub camera_direction: Vector3,
--    pub pad: u32,
+-    pub camera_position: Vector3,
+-    pub fov: f32,
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct CameraRays {
 +    // Scalar-array layout matches Slang's float[18], without float3 padding.
 +    // Order: origin, origin_dx, origin_dy, direction, direction_dx, direction_dy.
 +    pub rays: [[f32; 3]; 6],
- }
++}
  
--impl Camera {
--    pub fn make_push_constants(&self) -> InitializePreviewPushConstants {
--        let x = self.yaw.sin() * self.pitch.cos();
--        let y = self.pitch.sin();
--        let z = self.yaw.cos() * self.pitch.cos();
--
--        let camera_direction = Vector3::new(x, y, z).normalize();
-+impl InitializePreviewPushConstants {
+-    pub camera_direction: Vector3,
+-    pub pad0: u32,
++impl CameraRays {
 +    pub fn from_vectors(vectors: [Vector3; 6]) -> Self {
 +        Self { rays: vectors.map(|v| [v.x, v.y, v.z]) }
 +    }
 +}
  
--        let fov_half_tan = (self.fov.to_radians() * 0.5).tan();
-+// Reserve the future upstream RayTracingData (48) and uint2 resolution (8).
-+// This prepares the layout; the upstream revision and ABI are not ported here.
-+const _: () = assert!(size_of::<InitializePreviewPushConstants>() + 48 + 8 <= 128);
++#[repr(C)]
++pub struct InitializePreviewPushConstants {
++    pub rt: RayTracingData,
+     pub resolution: [u32; 2],
+-    pub pad1: u32,
+-    pub pad2: u32,
++    pub camera: CameraRays,
+ }
++const _: () = assert!(size_of::<InitializePreviewPushConstants>() == 128);
  
--        InitializePreviewPushConstants {
--            camera_position: self.position,
--            fov_half_tan,
--            camera_direction,
--            pad: 0,
--        }
-+impl Camera {
-+    pub fn make_push_constants(&self, aspect: f32) -> InitializePreviewPushConstants {
+ impl Camera {
+-    pub fn camera_direction(&self) -> Vector3 {
+-        let x = self.yaw.sin() * self.pitch.cos();
+-        let y = self.pitch.sin();
+-        let z = self.yaw.cos() * self.pitch.cos();
+-
+-        Vector3::new(x, y, z).normalize()
+-    }
+-
+-    pub fn fov_half_tan(&self) -> f32 {
+-        (self.fov.to_radians() * 0.5).tan()
++    pub fn rays(&self, aspect: f32) -> CameraRays {
 +        let forward = self.get_forward().normalize();
 +        let right = forward.cross(Vector3::UP).normalize();
 +        let up = right.cross(forward);
 +        let tangent = (self.fov.to_radians() * 0.5).tan();
-+        InitializePreviewPushConstants::from_vectors([
++        CameraRays::from_vectors([
 +            self.position, Vector3::ZERO, Vector3::ZERO,
 +            forward - right * (aspect * tangent) + up * tangent,
 +            right * (2.0 * aspect * tangent), up * (-2.0 * tangent),
@@ -495,7 +552,7 @@ index c3f6374..b2140e6 100644
  
      pub fn look_at(&mut self, target: Vector3) {
 diff --git a/src/compute_shader.rs b/src/compute_shader.rs
-index a5395ee..e3acbe9 100644
+index a5395ee7eaef25d64a8d2161db4d514436ed5720..e3acbe905493d1de6e9a38237238cfa903afdf3c 100644
 --- a/src/compute_shader.rs
 +++ b/src/compute_shader.rs
 @@ -90,6 +90,20 @@ impl ComputeShader {
@@ -520,10 +577,10 @@ index a5395ee..e3acbe9 100644
          assert!(!self.module.is_null());
          assert!(!self.pipeline.is_null());
 diff --git a/src/lib.rs b/src/lib.rs
-index 8aeb13a..6ebc2db 100644
+index 21ac4a85afbb3e37836642585bab22b0e55edcc2..df1cdab878fdb41146cd90c0a09ac0951dddceb2 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,5 +1,15 @@
+@@ -1,11 +1,19 @@
  #![allow(unsafe_op_in_unsafe_fn)]
  
 +mod preview_updates;
@@ -537,9 +594,15 @@ index 8aeb13a..6ebc2db 100644
 +mod preview_shader_contract;
 +
  use ash::vk::{self, Handle};
+-use std::hash::{DefaultHasher, Hash, Hasher};
  use std::io::{self, Write};
  use std::mem;
-@@ -85,6 +95,10 @@ pub struct Glim {
+ use std::path::PathBuf;
+-use std::sync::atomic::Ordering;
+ use std::time::Instant;
+ use std::{ptr, time::Duration};
+ 
+@@ -88,11 +96,14 @@ pub struct Glim {
      pub config: GlimConfig,
      pub vk: VulkanContext,
      pub window: *mut GLFWwindow,
@@ -550,15 +613,31 @@ index 8aeb13a..6ebc2db 100644
  
      pub meshes: [Mesh; GEOMETRIES_VARIANTS],
  
-@@ -106,6 +120,7 @@ pub struct Glim {
+     pub cpu_lights: Vec<Light>,
+-    pub cpu_lights_hash: u64,
+     pub light_cookies: Vec<TexturePixelsData>,
+     pub alphas: Vec<TexturePixelsData>,
+     pub emissive_triangles: Vec<u32>,
+@@ -101,7 +112,6 @@ pub struct Glim {
+ 
+     pub gpu_mesh: GpuMesh,
+     pub gpu_lights: Buffer,
+-    pub gpu_lights_staging: Buffer,
+     pub emissive_triangles_buffer: Buffer,
+ 
+     pub tlas: VulkanAs,
+@@ -111,8 +121,10 @@ pub struct Glim {
      pub camera: Camera,
  
      pub preview_shader: ComputeShader,
 +    pub preview_surface_shader: ComputeShader,
      pub init_from_camera_shader: ComputeShader,
      pub preview_initialized: bool,
++    pub preview_push_constants: PreviewPushConstants,
  
-@@ -151,6 +166,9 @@ impl Drop for Glim {
+     pub probes: Vec<SHProbeL2>,
+ 
+@@ -157,6 +169,9 @@ impl Drop for Glim {
          if !self.preview_shader.pipeline.is_null() {
              self.preview_shader.destroy(&self.vk);
          }
@@ -568,17 +647,38 @@ index 8aeb13a..6ebc2db 100644
          self.gpu_mesh.destroy(&self.vk);
  
          if !self.bvh_nodes.buffer.is_null() {
-@@ -232,7 +250,8 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
-     let vk = &mut app.vk;
-     let shader = &app.init_from_camera_shader;
+@@ -178,10 +193,6 @@ impl Drop for Glim {
+             self.gpu_lights.destroy(&self.vk);
+         }
  
--    let push = app.camera.make_push_constants();
-+    let push = app.external_view.map(|v| v.constants()).unwrap_or_else(||
-+        app.camera.make_push_constants(width as f32 / height as f32));
+-        if !self.gpu_lights_staging.buffer.is_null() {
+-            self.gpu_lights_staging.destroy(&self.vk);
+-        }
+-
+         if !self.emissive_triangles_buffer.buffer.is_null() {
+             self.emissive_triangles_buffer.destroy(&self.vk);
+         }
+@@ -243,16 +254,9 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
  
-     let constants_bytes = as_bytes(&push);
+     let push = InitializePreviewPushConstants {
+         rt: app.rt_data(),
+-        camera_position: app.camera.position,
+-        fov: app.camera.fov_half_tan(),
+-        camera_direction: app.camera.camera_direction(),
+-        pad0: 0,
+-        resolution: [
+-            app.config.preview_settings.width,
+-            app.config.preview_settings.height,
+-        ],
+-        pad1: 0,
+-        pad2: 0,
++        resolution: [width, height],
++        camera: app.external_view.map(|view| view.rays()).unwrap_or_else(||
++            app.camera.rays(width as f32 / height as f32)),
+     };
  
-@@ -299,11 +318,17 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
+     let push_bytes = as_bytes(&push);
+@@ -321,11 +325,17 @@ fn update_visibility_from_camera(app: &mut Glim, cmd: vk::CommandBuffer) {
          vk.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
      }
  
@@ -597,37 +697,67 @@ index 8aeb13a..6ebc2db 100644
      for mesh in &app.meshes {
          let message = format!(
              "Geometries Group Transparent: {}, Cast Shadows: {}, Vertices: {} Triangles: {}",
-@@ -326,16 +351,19 @@ fn initialize_render(app: &mut Glim) {
+@@ -346,47 +356,19 @@ fn initialize_render(app: &mut Glim) {
+     app.config.indirect_samples = clamp_samples(app.config.indirect_samples);
+     app.config.bounce_count = clamp_bounces(app.config.bounce_count);
  
-     // upload lights
-     if app.cpu_lights.len() > 0 {
--        // first other lights, then area, then mixed
--        app.cpu_lights.sort_unstable_by_key(|x| {
--            if x.ty == LightType::Area || x.ty == LightType::Disc {
--                1u8
--            } else if x.mixed {
--                2u8
--            } else {
--                0u8
--            }
--        });
-+        // Preview updates use the original Unity export order. Only the bake
-+        // passes require area and mixed lights to be partitioned.
-+        if !app.config.is_preview {
-+            app.cpu_lights.sort_unstable_by_key(|x| {
-+                if x.ty == LightType::Area || x.ty == LightType::Disc {
-+                    1u8
-+                } else if x.mixed {
-+                    2u8
-+                } else {
-+                    0u8
-+                }
-+            });
-+        }
+-    // upload lights
+-    if app.cpu_lights.len() > 0 {
+-        if !app.config.is_preview {
+-            // first other lights, then area, then mixed
+-            app.cpu_lights.sort_unstable_by_key(|x| {
+-                if x.ty == LightType::Area || x.ty == LightType::Disc {
+-                    1u8
+-                } else if x.mixed {
+-                    2u8
+-                } else {
+-                    0u8
+-                }
+-            });
+-        }
+-
+-        app.gpu_lights_staging = Buffer::empty(
+-            &app.vk,
+-            String::from("Lights Staging"),
+-            (app.cpu_lights.len() * size_of::<Light>()) as u64,
+-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC,
+-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+-        );
+-
+-        app.gpu_lights = Buffer::empty(
+-            &app.vk,
+-            String::from("Lights"),
+-            (app.cpu_lights.len() * size_of::<Light>()) as u64,
+-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+-        );
+-
+-        app.upload_lights();
+-    } else {
+-        app.gpu_lights = Buffer::empty(
+-            &app.vk,
+-            String::from("Lights"),
+-            std::mem::size_of::<Light>() as vk::DeviceSize,
+-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+-        );
++    // Bake passes require area and mixed lights to be partitioned.
++    if !app.config.is_preview {
++        app.cpu_lights.sort_unstable_by_key(|light| {
++            if light.ty == LightType::Area || light.ty == LightType::Disc {
++                1u8
++            } else if light.mixed {
++                2u8
++            } else {
++                0u8
++            }
++        });
+     }
++    app.upload_lights();
  
-         app.gpu_lights = Buffer::new(
-             &app.vk,
-@@ -421,8 +449,17 @@ fn initialize_render(app: &mut Glim) {
+     let use_ray_query = app.config.hardware_rt && app.vk.as_device.is_some();
+ 
+@@ -455,8 +437,17 @@ fn initialize_render(app: &mut Glim) {
          emissions.push(desc);
      }
  
@@ -647,7 +777,7 @@ index 8aeb13a..6ebc2db 100644
  
      const STAGING_RESOLUTION: u64 = 1024;
      let mut staging_buffer = Buffer::empty(
-@@ -439,8 +476,10 @@ fn initialize_render(app: &mut Glim) {
+@@ -473,8 +464,10 @@ fn initialize_render(app: &mut Glim) {
      for index in 0..app.groups.len() {
          let group = &app.groups[index];
  
@@ -660,7 +790,7 @@ index 8aeb13a..6ebc2db 100644
      }
  
      // free
-@@ -452,6 +491,7 @@ fn initialize_render(app: &mut Glim) {
+@@ -486,6 +479,7 @@ fn initialize_render(app: &mut Glim) {
  
      app.albedo_array = albedo_array;
      app.emission_array = emission_array;
@@ -668,8 +798,8 @@ index 8aeb13a..6ebc2db 100644
  
      if app.light_cookies.len() == 0 {
          let dummy_cookie = TexturePixelsData {
-@@ -560,8 +600,14 @@ fn initialize_render(app: &mut Glim) {
-         jitter_barycentrics: app.config.antialiasing as u32,
+@@ -585,8 +579,14 @@ fn initialize_render(app: &mut Glim) {
+         geometries_3_offset: geometries_offsets[3],
      };
  
 +}
@@ -684,66 +814,33 @@ index 8aeb13a..6ebc2db 100644
      } else {
          render_lightmaps(app)
      }
-@@ -589,6 +635,98 @@ fn format_window_title(
+@@ -614,6 +614,65 @@ fn format_window_title(
      );
  }
  
 +fn apply_preview_updates(app: &mut Glim) {
 +    preview_skybox::apply(app);
 +    preview_geometry::apply_updates(app);
-+    unsafe {
-+            if let Some(multiplier) = preview_updates::take_indirect() {
-+                if multiplier != app.config.indirect_intensity {
-+                    app.config.indirect_intensity = multiplier;
-+                    app.preview_push_constants.indirect_intensity = multiplier;
-+                    app.preview_initialized = false;
-+                }
-+            }
-+
-+            if let Some(states) = preview_updates::take() {
-+                if preview_updates::apply(&mut app.cpu_lights, &states, app.config.coordinate_system, app.cookie_array.textures.len()) {
-+                    // Finish all in-flight reads before changing the light buffer.
-+                    app.vk.device.device_wait_idle().unwrap();
-+                    let required = app.cpu_lights.len().max(1) * size_of::<Light>();
-+                    if required as u64 > app.gpu_lights.bytes {
-+                        app.gpu_lights.destroy(&app.vk);
-+                        app.gpu_lights = Buffer::empty(
-+                            &app.vk, String::from("Preview lights"),
-+                            (app.cpu_lights.len().next_power_of_two() * size_of::<Light>()) as u64,
-+                            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-+                            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-+                        );
-+                    }
-+                    app.preview_push_constants.lights_address = app.gpu_lights.gpu_address;
-+                    app.preview_push_constants.lights_count = app.cpu_lights.len() as u32;
-+                    if !app.cpu_lights.is_empty() {
-+                        let bytes = std::slice::from_raw_parts(
-+                            app.cpu_lights.as_ptr().cast::<u8>(),
-+                            app.cpu_lights.len() * size_of::<Light>(),
-+                        );
-+                        app.vk.upload_buffer(bytes, app.gpu_lights.buffer);
-+                        let cmd = app.vk.begin_single_use_cmd();
-+                        let barrier = vk::BufferMemoryBarrier::default()
-+                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-+                            .dst_access_mask(vk::AccessFlags::SHADER_READ)
-+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-+                            .buffer(app.gpu_lights.buffer)
-+                            .size(vk::WHOLE_SIZE);
-+                        app.vk.device.cmd_pipeline_barrier(
-+                            cmd,
-+                            vk::PipelineStageFlags::TRANSFER,
-+                            vk::PipelineStageFlags::COMPUTE_SHADER,
-+                            vk::DependencyFlags::empty(),
-+                            &[], &[barrier], &[],
-+                        );
-+                        app.vk.end_single_use_cmd(cmd);
-+                    }
-+                    app.preview_initialized = false;
-+                }
-+            }
-+
++    if let Some(multiplier) = preview_updates::take_indirect()
++        && multiplier != app.config.indirect_intensity
++    {
++        app.config.indirect_intensity = multiplier;
++        app.preview_push_constants.indirect_intensity = multiplier;
++        app.preview_initialized = false;
 +    }
++
++    if let Some(states) = preview_updates::take()
++        && preview_updates::apply(
++            &mut app.cpu_lights,
++            &states,
++            app.config.coordinate_system,
++            app.cookie_array.textures.len(),
++        )
++    {
++        app.upload_lights();
++        app.preview_initialized = false;
++    }
++
 +    let emissions = preview_bridge::take_emissions();
 +    let albedos = preview_bridge::take_albedos();
 +    if !emissions.is_empty() || !albedos.is_empty() {
@@ -783,25 +880,96 @@ index 8aeb13a..6ebc2db 100644
  fn render_preview(app: &mut Glim) {
      let window = app.window;
  
-@@ -630,7 +768,7 @@ fn render_preview(app: &mut Glim) {
+@@ -649,44 +708,34 @@ fn render_preview(app: &mut Glim) {
+     );
+     update_compute_shader(&app.vk, &app.preview_shader, &shader_bindings);
+ 
+-    let mut push = PreviewPushConstants {
+-        rt: app.rt_data(),
+-        sample_index: 0,
+-        sample_count: app.config.direct_emission_samples,
+-        light_count: app.cpu_lights.len() as u32,
+-        bounce_count: app.config.bounce_count,
+-        resolution: [
+-            app.config.preview_settings.width,
+-            app.config.preview_settings.height,
+-        ],
+-        lights: app.gpu_lights.gpu_address,
+-    };
+-
+     let mut previous_time = std::time::Instant::now();
+ 
+     let mut bake_start_time = std::time::Instant::now();
      let mut bake_complete_printed = false;
  
+-    let hardware_rt = app.config.hardware_rt && app.vk.as_device.is_some();
+-
      unsafe {
 -        while glfwWindowShouldClose(window) == 0 {
 +        while glfwWindowShouldClose(window) == 0 && !bindings::is_cancelled() {
              glfwPollEvents();
  
-             Log::progress(
-@@ -669,6 +807,8 @@ fn render_preview(app: &mut Glim) {
+-            Log::progress(push.sample_index as f32 / push.sample_count as f32);
++            Log::progress(
++                app.preview_push_constants.sample_index as f32
++                    / app.preview_push_constants.sample_count as f32,
++            );
+ 
+             {
+                 use std::ffi::c_char;
+ 
++                let hardwar_rt = app.config.hardware_rt && app.vk.as_device.is_some();
++
+                 let (mut w, mut h) = (0, 0);
+                 glfwGetWindowSize(window, &mut w, &mut h);
+ 
+                 format_window_title(
+                     &mut app.window_title,
+-                    push.sample_index,
+-                    push.sample_count,
++                    app.preview_push_constants.sample_index,
++                    app.preview_push_constants.sample_count,
+                     app.cpu_lights.len(),
+-                    hardware_rt,
++                    hardwar_rt,
+                     w,
+                     h,
+                 );
+@@ -704,21 +753,16 @@ fn render_preview(app: &mut Glim) {
  
              update_camera(app, delta_time);
  
+-            if LIGHT_UPDATE_REQUESTED.load(Ordering::Relaxed) {
+-                let changed = app.upload_lights();
+-                if changed {
+-                    app.preview_initialized = false;
+-                }
+-            }
 +            apply_preview_updates(app);
-+
+ 
              if !app.preview_initialized {
-                 app.preview_push_constants.sample_index = 0;
+-                push.sample_index = 0;
++                app.preview_push_constants.sample_index = 0;
                  bake_start_time = std::time::Instant::now();
-@@ -726,72 +866,17 @@ fn render_preview(app: &mut Glim) {
+                 bake_complete_printed = false;
+             }
+ 
+             // render finished
+-            if push.sample_index >= push.sample_count {
++            if app.preview_push_constants.sample_index >= app.preview_push_constants.sample_count {
+                 std::thread::sleep(Duration::from_millis(16));
+                 if !bake_complete_printed {
+                     io::stdout().flush().unwrap();
+@@ -728,7 +772,7 @@ fn render_preview(app: &mut Glim) {
+                 }
+             }
+ 
+-            if !render_sample_camera(app, &mut push) {
++            if !render_sample_camera(app) {
+                 // restart bake
+                 app.config.preview_settings.width = app.vk.swapchain.extent.width;
+                 app.config.preview_settings.height = app.vk.swapchain.extent.height;
+@@ -768,13 +812,98 @@ fn render_preview(app: &mut Glim) {
      }
  
      unsafe {
@@ -812,72 +980,128 @@ index 8aeb13a..6ebc2db 100644
      };
  }
  
--fn render_sample_camera(app: &mut Glim) -> bool {
--    let frame_index = app.vk.swapchain.frame_index;
--
--    let frame = &app.vk.swapchain.frames[frame_index];
--
+-fn render_sample_camera(app: &mut Glim, push: &mut PreviewPushConstants) -> bool {
 +fn record_preview_sample(app: &mut Glim, cmd: vk::CommandBuffer) {
-     let width = app.config.preview_settings.width;
-     let height = app.config.preview_settings.height;
--
--    let vk = &app.vk.device;
--
--    unsafe {
--        vk.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
--        vk.reset_fences(&[frame.fence]).unwrap()
--    }
--
--    let (image_index, _is_optimal) = match unsafe {
--        app.vk.swapchain_device.acquire_next_image(
--            app.vk.swapchain.swapchain,
--            u64::MAX,
--            frame.image_available_semaphore,
--            vk::Fence::null(),
--        )
--    } {
--        Ok(result) => result,
--        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
--            unsafe {
--                vk.device_wait_idle().unwrap();
--            }
--            app.vk.create_swapchain(width, height);
--            return false;
--        }
--        Err(e) => panic!("acquire failed: {e}"),
--    };
--
--    // assert!(is_optimal);
--
--    // todo: handle is_optimal
--    let fence = frame.fence;
--    let cmd = frame.command_buffer;
--    let image_available_semaphore = frame.image_available_semaphore;
--
--    let begin_info = vk::CommandBufferBeginInfo {
--        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
--        ..Default::default()
--    };
--
--    let subresource_range = vk::ImageSubresourceRange {
--        aspect_mask: vk::ImageAspectFlags::COLOR,
--        base_mip_level: 0,
--        level_count: 1,
--        base_array_layer: 0,
--        layer_count: 1,
--    };
--
-     unsafe {
--        vk.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
--            .unwrap();
--
--        vk.begin_command_buffer(cmd, &begin_info).unwrap();
--
-         if app.preview_push_constants.sample_index == 0 {
-             update_visibility_from_camera(app, cmd);
-             app.preview_initialized = true;
-@@ -822,20 +907,17 @@ fn render_sample_camera(app: &mut Glim) -> bool {
++    let width = app.config.preview_settings.width;
++    let height = app.config.preview_settings.height;
++    unsafe {
++        if app.preview_push_constants.sample_index == 0 {
++            update_visibility_from_camera(app, cmd);
++            app.preview_initialized = true;
++
++            let diffuse = &mut app.render_target.diffuse;
++
++            let vk: &VulkanContext = &app.vk;
++            let vk = &vk.device;
++            if diffuse.layout() != vk::ImageLayout::TRANSFER_DST_OPTIMAL {
++                let barrier = diffuse.barrier(
++                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
++                    vk::AccessFlags::empty(),
++                    vk::AccessFlags::TRANSFER_WRITE,
++                );
++                vk.cmd_pipeline_barrier(
++                    cmd,
++                    vk::PipelineStageFlags::TOP_OF_PIPE,
++                    vk::PipelineStageFlags::TRANSFER,
++                    vk::DependencyFlags::empty(),
++                    &[],
++                    &[],
++                    &[barrier],
++                );
++            }
++        }
++
++        let vk = &app.vk.device;
++
++        let diffuse = &mut app.render_target.diffuse;
++
++        let source = vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
++        let destination = vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE;
++        if diffuse.layout() == vk::ImageLayout::GENERAL {
++            let barrier = vk::MemoryBarrier::default().src_access_mask(source).dst_access_mask(destination);
++            vk.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
++                vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
++        } else {
++            let barrier = diffuse.barrier(vk::ImageLayout::GENERAL, source, destination);
++            vk.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
++                vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
++        }
++
++        if app.preview_push_constants.sample_index < app.preview_push_constants.sample_count {
++            let shader = &app.preview_shader;
++
++            app.preview_push_constants.rt = app.rt_data();
++            app.preview_push_constants.light_count = app.cpu_lights.len() as u32;
++            app.preview_push_constants.lights = app.gpu_lights.gpu_address;
++            let constants_bytes = as_bytes(&app.preview_push_constants);
++
++            let groups_x = (width + 7) / 8;
++            let groups_y = (height + 7) / 8;
++
++            vk.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, shader.pipeline);
++
++            vk.cmd_bind_descriptor_sets(
++                cmd,
++                vk::PipelineBindPoint::COMPUTE,
++                shader.pipeline_layout,
++                0,
++                &[shader.descriptor_set],
++                &[],
++            );
++
++            vk.cmd_push_constants(
++                cmd,
++                shader.pipeline_layout,
++                vk::ShaderStageFlags::COMPUTE,
++                0,
++                &constants_bytes,
++            );
++
++            vk.cmd_dispatch(cmd, groups_x, groups_y, 1);
++
++            app.preview_push_constants.sample_index += 1;
++        }
++
++    }
++}
++
++fn render_sample_camera(app: &mut Glim) -> bool {
+     let frame_index = app.vk.swapchain.frame_index;
  
+     let frame = &app.vk.swapchain.frames[frame_index];
+@@ -834,79 +963,9 @@ fn render_sample_camera(app: &mut Glim, push: &mut PreviewPushConstants) -> bool
+ 
+         vk.begin_command_buffer(cmd, &begin_info).unwrap();
+ 
+-        if push.sample_index == 0 {
+-            update_visibility_from_camera(app, cmd);
+-            app.preview_initialized = true;
+-
+-            let diffuse = &mut app.render_target.diffuse;
+-
+-            let vk: &VulkanContext = &app.vk;
+-            let vk = &vk.device;
+-            if diffuse.layout() != vk::ImageLayout::TRANSFER_DST_OPTIMAL {
+-                let barrier = diffuse.barrier(
+-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+-                    vk::AccessFlags::empty(),
+-                    vk::AccessFlags::TRANSFER_WRITE,
+-                );
+-                vk.cmd_pipeline_barrier(
+-                    cmd,
+-                    vk::PipelineStageFlags::TOP_OF_PIPE,
+-                    vk::PipelineStageFlags::TRANSFER,
+-                    vk::DependencyFlags::empty(),
+-                    &[],
+-                    &[],
+-                    &[barrier],
+-                );
+-            }
+-        }
+-
+-        let vk = &app.vk.device;
+-
++        record_preview_sample(app, cmd);
          let diffuse = &mut app.render_target.diffuse;
  
 -        let barrier = diffuse.barrier(
@@ -894,104 +1118,54 @@ index 8aeb13a..6ebc2db 100644
 -            &[],
 -            &[barrier],
 -        );
-+        let source = vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
-+        let destination = vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE;
-+        if diffuse.layout() == vk::ImageLayout::GENERAL {
-+            let barrier = vk::MemoryBarrier::default().src_access_mask(source).dst_access_mask(destination);
-+            vk.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
-+                vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
-+        } else {
-+            let barrier = diffuse.barrier(vk::ImageLayout::GENERAL, source, destination);
-+            vk.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
-+                vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
-+        }
- 
-         if app.preview_push_constants.sample_index < app.preview_push_constants.max_samples {
-             let shader = &app.preview_shader;
-@@ -869,6 +951,72 @@ fn render_sample_camera(app: &mut Glim) -> bool {
-             app.preview_push_constants.sample_index += 1;
-         }
- 
-+    }
-+}
-+
-+fn render_sample_camera(app: &mut Glim) -> bool {
-+    let frame_index = app.vk.swapchain.frame_index;
-+
-+    let frame = &app.vk.swapchain.frames[frame_index];
-+
-+    let width = app.config.preview_settings.width;
-+    let height = app.config.preview_settings.height;
-+
-+    let vk = &app.vk.device;
-+
-+    unsafe {
-+        vk.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
-+        vk.reset_fences(&[frame.fence]).unwrap()
-+    }
-+
-+    let (image_index, _is_optimal) = match unsafe {
-+        app.vk.swapchain_device.acquire_next_image(
-+            app.vk.swapchain.swapchain,
-+            u64::MAX,
-+            frame.image_available_semaphore,
-+            vk::Fence::null(),
-+        )
-+    } {
-+        Ok(result) => result,
-+        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-+            unsafe {
-+                vk.device_wait_idle().unwrap();
-+            }
-+            app.vk.create_swapchain(width, height);
-+            return false;
-+        }
-+        Err(e) => panic!("acquire failed: {e}"),
-+    };
-+
-+    // assert!(is_optimal);
-+
-+    // todo: handle is_optimal
-+    let fence = frame.fence;
-+    let cmd = frame.command_buffer;
-+    let image_available_semaphore = frame.image_available_semaphore;
-+
-+    let begin_info = vk::CommandBufferBeginInfo {
-+        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-+        ..Default::default()
-+    };
-+
-+    let subresource_range = vk::ImageSubresourceRange {
-+        aspect_mask: vk::ImageAspectFlags::COLOR,
-+        base_mip_level: 0,
-+        level_count: 1,
-+        base_array_layer: 0,
-+        layer_count: 1,
-+    };
-+
-+    unsafe {
-+        vk.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-+            .unwrap();
-+
-+        vk.begin_command_buffer(cmd, &begin_info).unwrap();
-+
-+        record_preview_sample(app, cmd);
-+        let diffuse = &mut app.render_target.diffuse;
-+
+-
+-        if push.sample_index < push.sample_count {
+-            let shader = &app.preview_shader;
+-
+-            let push_bytes = as_bytes(push);
+-
+-            let groups_x = (width + 7) / 8;
+-            let groups_y = (height + 7) / 8;
+-
+-            vk.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, shader.pipeline);
+-            vk.cmd_bind_descriptor_sets(
+-                cmd,
+-                vk::PipelineBindPoint::COMPUTE,
+-                shader.pipeline_layout,
+-                0,
+-                &[shader.descriptor_set],
+-                &[],
+-            );
+-            vk.cmd_push_constants(
+-                cmd,
+-                shader.pipeline_layout,
+-                vk::ShaderStageFlags::COMPUTE,
+-                0,
+-                &push_bytes,
+-            );
+-            vk.cmd_dispatch(cmd, groups_x, groups_y, 1);
+-            push.sample_index += 1;
+-        }
+-
          let swapchain_image = &app.vk.swapchain.frames[image_index as usize];
  
          let vk = &app.vk.device;
-@@ -1087,6 +1235,9 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
-         let max_samples = app.config.direct_emission_samples;
-         let bounce_count = app.config.bounce_count;
-         app.preview_push_constants = PreviewPushConstants {
-+            lights_address: app.gpu_lights.gpu_address,
-+            indirect_intensity: app.config.indirect_intensity,
-+            pad: 0,
-             lights_count: app.cpu_lights.len() as u32,
-             sample_index: 0,
-             width: width,
-@@ -1121,7 +1272,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
+@@ -1121,6 +1180,14 @@ fn update_render_target(app: &mut Glim, settings: &LightmapSettings) {
+     app.render_target.diffuse = diffuse;
+     app.render_target.visibility = visibility;
+ 
++    app.preview_push_constants = PreviewPushConstants {
++        indirect_intensity: app.config.indirect_intensity,
++        resolution: [width, height],
++        sample_count: app.config.direct_emission_samples.max(1),
++        bounce_count: app.config.bounce_count,
++        ..Default::default()
++    };
++
+     app.preview_initialized = false;
+ }
+ 
+@@ -1146,7 +1213,7 @@ fn extract_emissive_triangles(app: &mut Glim) {
          r != 0 || g != 0 || b != 0
      }
  
@@ -1000,7 +1174,7 @@ index 8aeb13a..6ebc2db 100644
          let mut extract = |vertices: &[Vertex], indices: &[u32]| {
              for primitive_id in 0..(indices.len() / 3) {
                  let i0 = indices[primitive_id * 3 + 0] as usize;
-@@ -1218,11 +1369,15 @@ impl LightmapGroup {
+@@ -1243,11 +1310,15 @@ impl LightmapGroup {
  
  impl Glim {
      pub fn new(config: GlimConfig, output_dir: PathBuf) -> Glim {
@@ -1017,7 +1191,7 @@ index 8aeb13a..6ebc2db 100644
              window_extensions: Vec::new(),
          };
  
-@@ -1239,7 +1394,7 @@ impl Glim {
+@@ -1265,7 +1336,7 @@ impl Glim {
          let mut vk = VulkanContext::new(&vulkan_config, create_surface_callback);
          println!("Vulkan Initialized");
  
@@ -1026,17 +1200,7 @@ index 8aeb13a..6ebc2db 100644
              vk.create_swapchain(
                  config.preview_settings.width,
                  config.preview_settings.height,
-@@ -1264,6 +1419,9 @@ impl Glim {
-         let gpu_lights = Buffer::null();
- 
-         let preview_push_constants = PreviewPushConstants {
-+            lights_address: 0,
-+            indirect_intensity: config.indirect_intensity,
-+            pad: 0,
-             lights_count: 0,
-             sample_index: 0,
-             width: 0,
-@@ -1332,9 +1490,14 @@ impl Glim {
+@@ -1349,15 +1420,21 @@ impl Glim {
              vk,
              meshes,
              window: window,
@@ -1051,17 +1215,185 @@ index 8aeb13a..6ebc2db 100644
              gpu_mesh: GpuMesh::null(),
              tlas: VulkanAs::null(),
              groups: Vec::new(),
+             camera,
+             init_from_camera_shader,
+             preview_initialized: false,
++            preview_push_constants: PreviewPushConstants::default(),
+             gpu_lights,
+             render_target,
+             probes: Vec::new(),
+@@ -1379,8 +1456,6 @@ impl Glim {
+             alphas_array: TextureArray::null(),
+             compacted_visibility: Buffer::null(),
+             benchmarks: Vec::with_capacity(32),
+-            gpu_lights_staging: Buffer::null(),
+-            cpu_lights_hash: 0,
+         }
+     }
+ 
+@@ -1404,69 +1479,57 @@ impl Glim {
+         self.alphas.push(alpha);
+     }
+ 
+-    fn upload_lights(&mut self) -> bool {
+-        if self.cpu_lights.len() == 0 {
+-            return false;
++    fn upload_lights(&mut self) {
++        let count = self.cpu_lights.len();
++        let bytes = (count * size_of::<Light>()) as vk::DeviceSize;
++        let allocated = !self.gpu_lights.buffer.is_null();
++        if allocated && count == 0 {
++            return;
+         }
+-
+-        let mut h = DefaultHasher::new();
+-        self.cpu_lights.hash(&mut h);
+-        let fingerprint = h.finish();
+-
+-        if self.cpu_lights_hash == fingerprint {
+-            return false;
++        if allocated {
++            // Finish shader reads before overwriting or releasing the buffer.
++            unsafe { self.vk.device.device_wait_idle().unwrap(); }
+         }
+-
+-        let capacity = self.gpu_lights_staging.bytes as usize / size_of::<Light>();
+-
+-        if capacity < self.cpu_lights.len() {
+-            println!("Resizing Lights Staging Buffer");
+-            self.gpu_lights_staging.destroy(&self.vk);
+-            self.gpu_lights_staging = Buffer::empty(
++        if !allocated || bytes > self.gpu_lights.bytes {
++            if allocated {
++                self.gpu_lights.destroy(&self.vk);
++            }
++            // Keep a valid buffer address even when the light count is zero.
++            let capacity = count.max(1).next_power_of_two() * size_of::<Light>();
++            self.gpu_lights = Buffer::empty(
+                 &self.vk,
+-                String::from("Lights Staging"),
+-                (self.cpu_lights.len() * size_of::<Light>()) as u64,
+-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC,
+-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
++                "Lights".into(),
++                capacity as vk::DeviceSize,
++                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
++                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+             );
+         }
++        if count == 0 {
++            return;
++        }
+ 
+-        let lights: &mut [Light] = unsafe {
+-            std::slice::from_raw_parts_mut(
+-                self.gpu_lights_staging.ptr as *mut Light,
+-                self.cpu_lights.len(),
+-            )
+-        };
+-
+-        unsafe {
+-            std::ptr::copy_nonoverlapping(
+-                self.cpu_lights.as_ptr(),
+-                lights.as_mut_ptr(),
+-                lights.len(),
+-            )
+-        };
+-
++        let data = unsafe { std::slice::from_raw_parts(self.cpu_lights.as_ptr().cast(), bytes as usize) };
++        self.vk.upload_buffer(data, self.gpu_lights.buffer);
+         let cmd = self.vk.begin_single_use_cmd();
++        let barrier = vk::BufferMemoryBarrier::default()
++            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
++            .dst_access_mask(vk::AccessFlags::SHADER_READ)
++            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
++            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
++            .buffer(self.gpu_lights.buffer)
++            .size(bytes);
+         unsafe {
+-            let region = vk::BufferCopy {
+-                src_offset: 0,
+-                dst_offset: 0,
+-                size: self.gpu_lights_staging.bytes,
+-            };
+-            self.vk.device.cmd_copy_buffer(
++            self.vk.device.cmd_pipeline_barrier(
+                 cmd,
+-                self.gpu_lights_staging.buffer,
+-                self.gpu_lights.buffer,
+-                &[region],
++                vk::PipelineStageFlags::TRANSFER,
++                vk::PipelineStageFlags::COMPUTE_SHADER,
++                vk::DependencyFlags::empty(),
++                &[],
++                &[barrier],
++                &[],
+             );
+         }
+         self.vk.end_single_use_cmd(cmd);
+-
+-        LIGHT_UPDATE_REQUESTED.store(false, Ordering::Relaxed);
+-
+-        self.cpu_lights_hash = fingerprint;
+-
+-        true
+     }
+ 
+     pub fn rt_data(&self) -> RayTracingData {
 diff --git a/src/lights.rs b/src/lights.rs
-index e3d5fd4..6711031 100644
+index eaaa695f1560b9caba6462a95680986bbcf4ebe4..6711031dbb60b85c400a492f0856c44259ce9b1c 100644
 --- a/src/lights.rs
 +++ b/src/lights.rs
-@@ -1,4 +1,4 @@
+@@ -1,8 +1,7 @@
 -use crate::math::{Vector2, Vector3};
+-use std::hash::{Hash, Hasher};
 +use crate::{bindings::CoordinateSystem, math::{Vector2, Vector3}};
  
  #[repr(u8)]
- #[derive(Debug, PartialEq)]
-@@ -58,3 +58,13 @@ impl Default for Light {
+-#[derive(Debug, PartialEq, Hash)]
++#[derive(Debug, PartialEq)]
+ pub enum LightType {
+     Directional = 0,
+     Point = 1,
+@@ -34,37 +33,6 @@ pub struct Light {
+     pub cookie: u32,
+ }
+ 
+-impl Hash for Light {
+-    fn hash<H: Hasher>(&self, state: &mut H) {
+-        self.position.x.to_bits().hash(state);
+-        self.position.y.to_bits().hash(state);
+-        self.position.z.to_bits().hash(state);
+-
+-        self.direction.x.to_bits().hash(state);
+-        self.direction.y.to_bits().hash(state);
+-        self.direction.z.to_bits().hash(state);
+-
+-        self.up.x.to_bits().hash(state);
+-        self.up.y.to_bits().hash(state);
+-        self.up.z.to_bits().hash(state);
+-
+-        self.color.x.to_bits().hash(state);
+-        self.color.y.to_bits().hash(state);
+-        self.color.z.to_bits().hash(state);
+-
+-        self.range.to_bits().hash(state);
+-        self.shadow_radius_or_angle.to_bits().hash(state);
+-        self.spot_inner_percent.to_bits().hash(state);
+-        self.spot_outer.to_bits().hash(state);
+-
+-        self.area_or_cookie_size.x.to_bits().hash(state);
+-        self.area_or_cookie_size.y.to_bits().hash(state);
+-
+-        self.cast_shadows.hash(state);
+-        self.ty.hash(state);
+-    }
+-}
+-
+ impl Default for Light {
+     fn default() -> Self {
+         Self {
+@@ -90,3 +58,13 @@ impl Default for Light {
          }
      }
  }
@@ -1076,7 +1408,7 @@ index e3d5fd4..6711031 100644
 +    }
 +}
 diff --git a/src/mesh.rs b/src/mesh.rs
-index cbcb7bf..7063dda 100644
+index a1c09e814872e346ce693b2af7a46265112dfb8d..81c32fc566d1c4a3637aeae3c5019929cdd60c43 100644
 --- a/src/mesh.rs
 +++ b/src/mesh.rs
 @@ -42,10 +42,10 @@ pub struct FfiMesh {
@@ -1106,7 +1438,7 @@ index cbcb7bf..7063dda 100644
  
          self.gpu_address = 0;
 diff --git a/src/oidn.rs b/src/oidn.rs
-index c7a1d8c..a55185f 100644
+index 2b1273f8d25a3c99346d9cd47369bf52aeaf68e0..b7537f7a441c692d743ec2e4bcedfebf5808ff52 100644
 --- a/src/oidn.rs
 +++ b/src/oidn.rs
 @@ -117,6 +117,10 @@ pub struct Oidn {
@@ -1202,13 +1534,13 @@ index c7a1d8c..a55185f 100644
      }
 diff --git a/src/preview_bridge.rs b/src/preview_bridge.rs
 new file mode 100644
-index 0000000..fa8ad22
+index 0000000000000000000000000000000000000000..c885ba207c40771ffdd0d00bf975d69510d4e82e
 --- /dev/null
 +++ b/src/preview_bridge.rs
 @@ -0,0 +1,306 @@
 +//! Owned, bounded mailboxes between the Unity thread and the Vulkan thread.
 +use std::{collections::{BTreeMap, hash_map::DefaultHasher}, hash::Hasher, sync::Mutex};
-+use crate::{camera::InitializePreviewPushConstants, math::Vector3};
++use crate::{camera::CameraRays, math::Vector3};
 +
 +#[repr(C)]
 +#[derive(Clone, Copy, Debug)]
@@ -1233,8 +1565,8 @@ index 0000000..fa8ad22
 +        self.direction.length_squared() > 0.000001
 +    }
 +
-+    pub fn constants(&self) -> InitializePreviewPushConstants {
-+        InitializePreviewPushConstants::from_vectors([
++    pub fn rays(&self) -> CameraRays {
++        CameraRays::from_vectors([
 +            self.origin, self.origin_dx, self.origin_dy,
 +            self.direction, self.direction_dx, self.direction_dy,
 +        ])
@@ -1433,8 +1765,8 @@ index 0000000..fa8ad22
 +    #[test]
 +    fn view_layout_and_validation() {
 +        assert_eq!(size_of::<PreviewView>(), 84);
-+        assert_eq!(size_of::<InitializePreviewPushConstants>(), 72);
-+        assert_eq!(std::mem::offset_of!(InitializePreviewPushConstants, rays), 0);
++        assert_eq!(size_of::<CameraRays>(), 72);
++        assert_eq!(std::mem::offset_of!(CameraRays, rays), 0);
 +        assert_eq!(std::mem::offset_of!(PreviewView, revision), 80);
 +        let mut view = PreviewView { origin: Vector3::ZERO, origin_dx: Vector3::ZERO,
 +            origin_dy: Vector3::ZERO, direction: Vector3::new(0.0, 0.0, -1.0),
@@ -1514,10 +1846,10 @@ index 0000000..fa8ad22
 +}
 diff --git a/src/preview_denoise.rs b/src/preview_denoise.rs
 new file mode 100644
-index 0000000..3762f3f
+index 0000000000000000000000000000000000000000..7e5c0065a9532395ba481004634c248462d76af7
 --- /dev/null
 +++ b/src/preview_denoise.rs
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,243 @@
 +//! OIDN works on demodulated surface lighting; materials/emission stay untouched.
 +use std::{sync::mpsc, thread, time::{Duration, Instant}};
 +use ash::vk::{self, Handle};
@@ -1530,8 +1862,12 @@ index 0000000..3762f3f
 +}
 +
 +#[repr(C)]
-+pub struct SurfacePush { output_address: vk::DeviceAddress, width: u32, height: u32 }
-+const _: () = assert!(size_of::<SurfacePush>() + 48 <= 128);
++pub struct SurfacePush {
++    rt: RayTracingData,
++    output_address: vk::DeviceAddress,
++    width: u32,
++    height: u32,
++}
 +
 +struct Job {
 +    epoch: u64, generation: u64, revision: u32, samples: u32,
@@ -1635,7 +1971,7 @@ index 0000000..3762f3f
 +            return;
 +        };
 +        let samples = app.preview_push_constants.sample_index;
-+        if samples < app.preview_push_constants.max_samples.min(8) || samples == 0 { return; }
++        if samples < app.preview_push_constants.sample_count.min(8) || samples == 0 { return; }
 +        if self.worker.as_ref().map(|w| w.busy).unwrap_or(false) { return; }
 +        let stamp = (epoch, generation, samples);
 +        if self.submitted == Some(stamp) { return; }
@@ -1693,7 +2029,7 @@ index 0000000..3762f3f
 +        app.vk.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, shader.pipeline);
 +        app.vk.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, shader.pipeline_layout,
 +            0, &[shader.descriptor_set], &[]);
-+        let push = SurfacePush { output_address: buffer.gpu_address, width, height };
++        let push = SurfacePush { rt: app.rt_data(), output_address: buffer.gpu_address, width, height };
 +        app.vk.device.cmd_push_constants(cmd, shader.pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, &as_bytes(&push));
 +        app.vk.device.cmd_dispatch(cmd, width.div_ceil(8), height.div_ceil(8), 1);
 +        let barrier = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -1759,10 +2095,10 @@ index 0000000..3762f3f
 +}
 diff --git a/src/preview_embedded.rs b/src/preview_embedded.rs
 new file mode 100644
-index 0000000..72e328b
+index 0000000000000000000000000000000000000000..0bf195f8f2a590aa7e0faba584ed93dc77ac75b8
 --- /dev/null
 +++ b/src/preview_embedded.rs
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,482 @@
 +use std::time::{Duration, Instant};
 +use ash::vk;
 +use ash::vk::Handle;
@@ -1822,7 +2158,7 @@ index 0000000..72e328b
 +            generation += 1;
 +            preview_bridge::begin_generation(generation);
 +        }
-+        if app.preview_push_constants.sample_index >= app.preview_push_constants.max_samples {
++        if app.preview_push_constants.sample_index >= app.preview_push_constants.sample_count {
 +            denoise.update(app, generation);
 +            std::thread::sleep(Duration::from_millis(10));
 +            continue;
@@ -1830,7 +2166,7 @@ index 0000000..72e328b
 +        let cmd = app.vk.begin_single_use_cmd();
 +        record_preview_sample(app, cmd);
 +        let samples = app.preview_push_constants.sample_index;
-+        let copy = samples == 1 || samples == app.preview_push_constants.max_samples ||
++        let copy = samples == 1 || samples == app.preview_push_constants.sample_count ||
 +            last_frame.elapsed() >= Duration::from_millis(66);
 +        if copy {
 +            let diffuse = &mut app.render_target.diffuse;
@@ -2028,7 +2364,6 @@ index 0000000..72e328b
 +            // Exercise the complete GPU capture -> OIDN -> recomposition path
 +            // with reflected illumination, then a live light deletion at one camera revision.
 +            view.origin.x = -1.; view.revision += 1;
-+            assert!(app_update_preview_view(view));
 +            let light = crate::preview_updates::PreviewLightState {
 +                color: Vector3::new(6.,6.,6.), position: Vector3::ZERO,
 +                direction: Vector3::new(0.,0.,-1.), up: Vector3::new(0.,1.,0.),
@@ -2036,10 +2371,27 @@ index 0000000..72e328b
 +                ty: 0, cast_shadows: 0, mixed: 0, cookie: u32::MAX, shadow_radius_or_angle: 0.,
 +            };
 +            assert!(unsafe { crate::preview_updates::app_update_preview_lights(&light, 1) });
-+            let lit = read(view);
-+            let filtered = denoised(view);
++            assert!(app_update_preview_view(view));
++            let single = read(view);
 +            let center = 4*(view.width as usize*(view.height as usize/2)+view.width as usize/2);
-+            assert!(lit[center+1] > 1., "Test surface has no reflected HDR illumination");
++            assert!(single[center+1] > 1., "Test surface has no reflected HDR illumination");
++
++            let read_light_update = |previous_generation| {
++                let until = Instant::now() + Duration::from_secs(60);
++                loop {
++                    let frame = read(view);
++                    if frame_generation.get() > previous_generation { return frame; }
++                    assert!(Instant::now() < until, "Light update did not reset accumulation");
++                }
++            };
++            // The second light grows the buffer. Both slots must contribute.
++            let old_generation = frame_generation.get();
++            let lights = [light; 2];
++            assert!(unsafe { crate::preview_updates::app_update_preview_lights(lights.as_ptr(), 2) });
++            let lit = read_light_update(old_generation);
++            assert!((lit[center+1] - 2. * single[center+1]).abs() < 0.01,
++                "A light was lost while growing the GPU buffer: {} -> {}", single[center+1], lit[center+1]);
++            let filtered = denoised(view);
 +            assert!(filtered[center+1] > 1. && filtered.iter().all(|v| v.is_finite()), "Surface lighting lost HDR in OIDN");
 +            // Albedo-only edits must change reflected light and denoised color
 +            // without rebuilding geometry, altering emission, or changing the camera.
@@ -2071,8 +2423,8 @@ index 0000000..72e328b
 +            }
 +            let old_generation = frame_generation.get();
 +            assert!(unsafe { crate::preview_updates::app_update_preview_lights(std::ptr::null(), 0) });
-+            let unlit = read(view);
-+            assert!(frame_generation.get() > old_generation, "Light edits did not invalidate OIDN");
++            let unlit = read_light_update(old_generation);
++            assert!(unlit[center+1] < 0.001 && unlit[center+2] < 0.001, "Removed lights still illuminate the surface");
 +            assert_eq!(denoised(view), unlit, "Old denoised lighting survived a light edit");
 +            // Environment edits must invalidate lit surfaces, background and OIDN
 +            // at the same camera revision. Intensity must not require a new cubemap.
@@ -2231,10 +2583,10 @@ index 0000000..72e328b
 +}
 diff --git a/src/preview_geometry.rs b/src/preview_geometry.rs
 new file mode 100644
-index 0000000..a584a91
+index 0000000000000000000000000000000000000000..ca78edc17a61b86188ef6288d49c3c5df8273c8d
 --- /dev/null
 +++ b/src/preview_geometry.rs
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,255 @@
 +use std::{collections::BTreeMap, sync::Mutex};
 +use ash::{vk, vk::Handle};
 +use crate::{*, mesh::{Vertex, encode_normal_octahedron, AccelerationStructureType}, math::Vector2};
@@ -2336,16 +2688,14 @@ index 0000000..a584a91
 +    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
 +}
 +
-+fn upload_bvh_buffer(vk: &VulkanContext, buffer: &mut Buffer, data: &[u8], name: &str) -> bool {
-+    let grew = data.len() as u64 > buffer.bytes;
-+    if grew {
++fn upload_bvh_buffer(vk: &VulkanContext, buffer: &mut Buffer, data: &[u8], name: &str) {
++    if data.len() as u64 > buffer.bytes {
 +        buffer.destroy(vk);
 +        *buffer = Buffer::empty(vk, name.into(), data.len().next_power_of_two() as u64,
 +            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
 +            vk::MemoryPropertyFlags::DEVICE_LOCAL);
 +    }
 +    vk.upload_buffer(data, buffer.buffer);
-+    grew
 +}
 +
 +pub(crate) fn refresh_shaders(app: &mut Glim, recompile: bool) {
@@ -2401,7 +2751,6 @@ index 0000000..a584a91
 +        vk::PipelineStageFlags::ALL_COMMANDS, vk::DependencyFlags::empty(), &[barrier], &[], &[]); }
 +    app.vk.end_single_use_cmd(cmd);
 +
-+    let mut recompile = false;
 +    match &mut app.gpu_mesh.acceleration_structure {
 +        AccelerationStructureType::RayQuery(blases) => {
 +            app.tlas.destroy(&app.vk);
@@ -2429,10 +2778,8 @@ index 0000000..a584a91
 +                }
 +            }
 +            *cwbvh = cwbvh::Cwbvh::build(&triangles);
-+            recompile |= upload_bvh_buffer(&app.vk, &mut app.bvh_nodes, bytes(&cwbvh.nodes), "Preview BVH nodes");
-+            recompile |= upload_bvh_buffer(&app.vk, &mut app.bvh_triangles, bytes(&cwbvh.triangles), "Preview BVH triangles");
-+            app.constants.bvh_nodes_address = app.bvh_nodes.gpu_address;
-+            app.constants.bvh_triangles_address = app.bvh_triangles.gpu_address;
++            upload_bvh_buffer(&app.vk, &mut app.bvh_nodes, bytes(&cwbvh.nodes), "Preview BVH nodes");
++            upload_bvh_buffer(&app.vk, &mut app.bvh_triangles, bytes(&cwbvh.triangles), "Preview BVH triangles");
 +        }
 +    }
 +    let cmd = app.vk.begin_single_use_cmd();
@@ -2441,7 +2788,7 @@ index 0000000..a584a91
 +    unsafe { app.vk.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS,
 +        vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[barrier], &[], &[]); }
 +    app.vk.end_single_use_cmd(cmd);
-+    refresh_shaders(app, recompile);
++    refresh_shaders(app, false);
 +    app.preview_initialized = false;
 +}
 +
@@ -2497,10 +2844,10 @@ index 0000000..a584a91
 +}
 diff --git a/src/preview_scene.rs b/src/preview_scene.rs
 new file mode 100644
-index 0000000..6f405b2
+index 0000000000000000000000000000000000000000..ffaaf108c6a9594c55436eaa749cb74d516e9b40
 --- /dev/null
 +++ b/src/preview_scene.rs
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,317 @@
 +//! Own a replacement export until the render thread can install it atomically.
 +use std::sync::Mutex;
 +use ash::vk::Handle;
@@ -2753,8 +3100,6 @@ index 0000000..6f405b2
 +    }
 +    preview_geometry::set_mesh_count(app.preview_meshes.len());
 +    preview_geometry::refresh_shaders(app, true);
-+    app.preview_push_constants.lights_address = app.gpu_lights.gpu_address;
-+    app.preview_push_constants.lights_count = app.cpu_lights.len() as u32;
 +    app.preview_initialized = false;
 +    Log::msg(&format!("Preview refresh: reused {reused_groups} material atlases and {reused_meshes} meshes"));
 +    mark_ready(app, revision);
@@ -2822,7 +3167,7 @@ index 0000000..6f405b2
 +}
 diff --git a/src/preview_shader_contract.rs b/src/preview_shader_contract.rs
 new file mode 100644
-index 0000000..c8e3567
+index 0000000000000000000000000000000000000000..a0520beffd80c3ce2bfaddb45facd892f3fcb031
 --- /dev/null
 +++ b/src/preview_shader_contract.rs
 @@ -0,0 +1,138 @@
@@ -2900,17 +3245,17 @@ index 0000000..c8e3567
 +}
 +
 +#[test]
-+fn preview_compiled_layouts_match_host_and_reserve_upstream_space() {
-+    for (name, size, offsets, reserve) in [
-+        (ShaderName::InitializePreview, size_of::<InitializePreviewPushConstants>(), vec![0], 48 + 8),
-+        (ShaderName::Preview, size_of::<PreviewPushConstants>(), vec![0, 4, 8, 12, 16, 20, 24, 32, 36], 48),
-+        (ShaderName::PreviewSurface, size_of::<SurfacePush>(), vec![0, 8, 12], 48),
++fn preview_compiled_layouts_match_host() {
++    for (name, size, offsets) in [
++        (ShaderName::InitializePreview, size_of::<InitializePreviewPushConstants>(), vec![0, 48, 56]),
++        (ShaderName::Preview, size_of::<PreviewPushConstants>(), vec![0, 48, 52, 56, 60, 64, 72, 80, 84, 88, 92]),
++        (ShaderName::PreviewSurface, size_of::<SurfacePush>(), vec![0, 48, 56, 60]),
 +    ] {
 +        for hardware in [false, true] {
 +            let spv = Spirv::new(&load_shader_bytes(name, hardware));
 +            assert_eq!(spv.offsets(spv.push_type()), offsets);
 +            assert_eq!(spv.bytes(spv.push_type()), size);
-+            assert!(size + reserve <= 128, "preview leaves no room for upstream push data");
++            assert!(size <= 128, "preview exceeds the portable push-constant limit");
 +        }
 +    }
 +}
@@ -2938,7 +3283,7 @@ index 0000000..c8e3567
 +    let view = PreviewView { origin: vectors[0], origin_dx: vectors[1], origin_dy: vectors[2],
 +        direction: vectors[3], direction_dx: vectors[4], direction_dy: vectors[5],
 +        width: 37, height: 19, revision: 1 };
-+    let constants = view.constants();
++    let constants = view.rays();
 +    let bytes = crate::as_bytes(&constants);
 +    assert_eq!(bytes.len(), 72);
 +    let floats: Vec<f32> = bytes.chunks_exact(4).map(|v| f32::from_ne_bytes(v.try_into().unwrap())).collect();
@@ -2966,7 +3311,7 @@ index 0000000..c8e3567
 +}
 diff --git a/src/preview_skybox.rs b/src/preview_skybox.rs
 new file mode 100644
-index 0000000..44cf639
+index 0000000000000000000000000000000000000000..44cf63903e161bf564b49558845ad04e3e036c9c
 --- /dev/null
 +++ b/src/preview_skybox.rs
 @@ -0,0 +1,102 @@
@@ -3074,10 +3419,10 @@ index 0000000..44cf639
 +}
 diff --git a/src/preview_updates.rs b/src/preview_updates.rs
 new file mode 100644
-index 0000000..45b462a
+index 0000000000000000000000000000000000000000..90e144bfe213590ca58ef3ee036f5e4de89cb2d7
 --- /dev/null
 +++ b/src/preview_updates.rs
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,299 @@
 +use std::sync::Mutex;
 +use crate::{bindings::CoordinateSystem, lights::Light, math::{Vector2, Vector3}};
 +
@@ -3372,14 +3717,13 @@ index 0000000..45b462a
 +        assert_eq!(std::mem::offset_of!(PreviewLightState, ty), 68);
 +        assert_eq!(std::mem::offset_of!(PreviewLightState, cookie), 80);
 +        assert_eq!(std::mem::offset_of!(PreviewLightState, shadow_radius_or_angle), 84);
-+        assert_eq!(std::mem::size_of::<crate::shader::PreviewPushConstants>(), 40);
-+        assert_eq!(std::mem::offset_of!(crate::shader::PreviewPushConstants, lights_address), 24);
-+        assert_eq!(std::mem::offset_of!(crate::shader::PreviewPushConstants, indirect_intensity), 32);
++        assert_eq!(std::mem::size_of::<crate::shader::PreviewPushConstants>(), 96);
++        assert_eq!(std::mem::offset_of!(crate::shader::PreviewPushConstants, lights), 72);
++        assert_eq!(std::mem::offset_of!(crate::shader::PreviewPushConstants, indirect_intensity), 80);
 +    }
 +}
-+
 diff --git a/src/shader.rs b/src/shader.rs
-index 9c30855..82e6595 100644
+index b8fedbc85836c73f8dc562d229d1cbebc2b83882..1e607f13b412027cfd60d77731da1e49b3b68116 100644
 --- a/src/shader.rs
 +++ b/src/shader.rs
 @@ -2,6 +2,7 @@ use ash::vk::{self, Handle};
@@ -3432,7 +3776,7 @@ index 9c30855..82e6595 100644
      };
  
      let aligned = bytes
-@@ -268,7 +280,7 @@ pub fn load_compute_shader(
+@@ -254,7 +266,7 @@ pub fn load_compute_shader(
          size: push_constants_size as u32,
      }];
  
@@ -3441,7 +3785,7 @@ index 9c30855..82e6595 100644
  
      ComputeShader::new(
          vk,
-@@ -279,6 +291,13 @@ pub fn load_compute_shader(
+@@ -265,6 +277,13 @@ pub fn load_compute_shader(
      )
  }
  
@@ -3455,18 +3799,31 @@ index 9c30855..82e6595 100644
  pub fn update_compute_shader(
      vk: &VulkanContext,
      shader: &ComputeShader,
-@@ -483,4 +502,9 @@ pub struct PreviewPushConstants {
-     pub width: u32,
-     pub height: u32,
-     pub bounce_count: u32,
-+    // Host-side Vulkan address; the shader uses a typed pointer, not uint64_t.
-+    pub lights_address: vk::DeviceAddress,
-+    pub indirect_intensity: f32,
-+    pub pad: u32,
+@@ -461,6 +480,7 @@ pub fn update_compute_shader(
  }
-+const _: () = assert!(size_of::<PreviewPushConstants>() + 48 <= 128);
+ 
+ #[repr(C, align(16))]
++#[derive(Default)]
+ pub struct RayTracingData {
+     pub indices: vk::DeviceAddress,
+     pub vertices: vk::DeviceAddress,
+@@ -473,6 +493,7 @@ pub struct RayTracingData {
+ }
+ 
+ #[repr(C, align(16))]
++#[derive(Default)]
+ pub struct PreviewPushConstants {
+     pub rt: RayTracingData,
+ 
+@@ -483,4 +504,6 @@ pub struct PreviewPushConstants {
+ 
+     pub resolution: [u32; 2],
+     pub lights: vk::DeviceAddress,
++    pub indirect_intensity: f32,
++    pub pad: [u32; 3],
+ }
 diff --git a/src/skybox.rs b/src/skybox.rs
-index f6deea4..f1a3055 100644
+index f6deea4dbdeee62f69b8733a69150c8b0af40569..f1a305539be91b0fc526ec2202cf8d996985d185 100644
 --- a/src/skybox.rs
 +++ b/src/skybox.rs
 @@ -134,7 +134,7 @@ impl Skybox {
@@ -3479,7 +3836,7 @@ index f6deea4..f1a3055 100644
                  &[],
                  &[],
 diff --git a/src/texture2d.rs b/src/texture2d.rs
-index a836d3a..ccc2a19 100644
+index a836d3a022721f638a20a5fafa46f8daba846463..ccc2a19ffda3c6c12d24b98ce21dfe458396a1ff 100644
 --- a/src/texture2d.rs
 +++ b/src/texture2d.rs
 @@ -28,7 +28,7 @@ pub fn register_gpu_alloc(bytes: u64) -> f64 {
@@ -3510,7 +3867,7 @@ index a836d3a..ccc2a19 100644
  
          self.view = vk::ImageView::null();
 diff --git a/src/texture_array.rs b/src/texture_array.rs
-index ecf06cf..e5041e0 100644
+index ecf06cf11ad9763d9180a630ea0c4aba58cb96aa..e5041e0c7cec6e3697f9c8258c52928d4f8da0fc 100644
 --- a/src/texture_array.rs
 +++ b/src/texture_array.rs
 @@ -9,6 +9,8 @@ use crate::{

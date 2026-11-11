@@ -103,3 +103,18 @@ This change prepares the add-on payloads; it does not port the later upstream re
   manual restart, and baked UV preservation.
 - Release native build succeeded and all 26 Unity bridge exports loaded. The
   regenerated patch applies cleanly to the original Glim 0.12.0 revision.
+
+## Glim 0.12.2 renderer port (2026-11-11)
+
+- The Windows release build applied the patch to Glim 0.12.2 and loaded all
+  26 preview bridge exports and eight UV packer exports.
+- The noninteractive native suite passed 25 tests, including the upstream bake
+  and UV packer tests. The dedicated OIDN regression passed separately.
+- The embedded GPU regression passed in both hardware and software ray-tracing
+  modes with Vulkan validation enabled. It exercised live light, material,
+  geometry, and skybox updates, camera changes, resizing, and scene replacement.
+- The Unity 2022.3.22f1 Scene View regression passed with Glim 0.12.0 and
+  0.12.2. The focused skybox and Lightmapper selection tests passed with 0.12.2.
+- After sharing the startup and live light uploader, the GPU regression
+  verified buffer growth and removal of all lights in both ray-tracing modes.
+  The Unity Scene View regression passed with the rebuilt Windows DLL.

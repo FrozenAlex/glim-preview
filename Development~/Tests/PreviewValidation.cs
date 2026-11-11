@@ -37,6 +37,8 @@ namespace FrozenAlex.GlimPreview
             Directory.CreateDirectory(resultDir);
             try
             {
+                string compatibilityError = LivePreviewWindow.CompatibilityError();
+                if (compatibilityError != null) throw new InvalidOperationException(compatibilityError);
                 EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
                 RenderSettings.skybox = null;
                 RenderSettings.ambientIntensity = 0;

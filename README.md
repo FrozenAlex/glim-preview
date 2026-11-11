@@ -82,8 +82,8 @@ copies, preserving the scene's baked lightmap UVs.
 ## Updating and rebuilding
 
 This package is separate from `io.github.z3y.glim`, so updating Glim does not replace
-the add-on files. Compatibility is checked against Glim 0.12.x; a later upstream
-version needs a matching add-on port.
+the add-on files. The bundled preview renderer is based on Glim 0.12.2.
+The add-on accepts Glim 0.12.x.
 
 The repository's `Development~` directory contains the native patch,
 pinned upstream revision, build script, and isolated Unity visual regression.
@@ -117,7 +117,7 @@ post-processing package installed. See [development notes](Development~/README.m
 
 Update `package.json`'s version, commit and push, then run **Actions → Build Release**
 with **publish** enabled. Alternatively, push a matching version tag such as
-`v0.1.5`. Leaving **publish** disabled builds downloadable workflow artifacts only.
+`v0.1.6`. Leaving **publish** disabled builds downloadable workflow artifacts only.
 The workflow builds the patched Rust renderer on Windows and Ubuntu, packages
 both native libraries in one VPM ZIP, and publishes the ZIP, manifest,
 checksum, and signed build provenance bundle. The VPM listing checks for releases hourly; its **Build Repo Listing**

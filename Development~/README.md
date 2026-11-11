@@ -1,8 +1,9 @@
 # Glim Live Preview add-on development
 
 This repository root is the Unity package. Install it as `Packages/com.frozenalex.glim-preview`.
-Supported upstream: Glim **0.12.0**, revision
-`1c405dffb33ab131d501f5cc45d3ee68dc098ce0`.
+The native renderer is based on Glim **0.12.2**, revision
+`5f7a25f414f20c3a90f2a147c69cc3a64dd6c262`.
+The Unity add-on supports Glim 0.12.x.
 
 The managed source lives in `Editor/`, under its own namespace and
 assembly. It reuses Glim's runtime settings and public editor utilities. Its
@@ -13,14 +14,12 @@ the native live-update, embedded HDR preview, diagnostics support, and OIDN work
 The port uses Glim 0.12's vertex layout, normalized UVs, visibility-buffer format,
 zero-radius lights, and group-before-mesh export order.
 
-The camera push payload packs six vectors as 18 scalar floats (72 bytes). This
-reserves 48 bytes for upstream ray-tracing addresses and 8 bytes for resolution,
-fitting the portable 128-byte limit when that later port happens. The current
-upstream revision remains pinned above. Preview lighting uses 40 bytes and the
-denoising capture uses 16 bytes. Shader addresses use typed pointers, without a
-`shaderInt64` requirement; Rust still stores Vulkan device addresses as 64-bit
-host values. Unit tests inspect compiled SPIR-V sizes, offsets, and capabilities
-so padding changes or accidental `Int64` requirements fail CI.
+Glim 0.12.2 passes ray-tracing buffer addresses to each dispatch in a 48-byte
+push-constant block. The camera packs six ray vectors as 18 scalar floats
+(72 bytes), leaving 8 bytes for the resolution within the portable 128-byte
+limit. Preview lighting uses 96 bytes and denoising capture uses 64 bytes.
+The shaders use typed pointers and require no `shaderInt64` feature. Unit tests
+inspect compiled SPIR-V sizes, member offsets, and capabilities.
 
 Hardware and software ray tracing use separate compiled shader variants. The
 software variant omits `TopLevelAS` and ray-query code entirely, matching its
@@ -100,7 +99,7 @@ To check packaging locally after building:
 
 ```powershell
 python -m unittest discover -s Development~ -p test_package_release.py -v
-python Development~/package_release.py --native-dll dist/glim_preview_addon_012_v1.dll --native-so dist/glim_preview_addon_012_v1.so --output dist/package --tag v0.1.5
+python Development~/package_release.py --native-dll dist/glim_preview_addon_012_v1.dll --native-so dist/glim_preview_addon_012_v1.so --output dist/package --tag v0.1.6
 ```
 
 For a new release, change the manifest version and push that commit. Run **Build
