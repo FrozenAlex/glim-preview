@@ -72,36 +72,43 @@ namespace FrozenAlex.GlimPreview
                 Debug.LogError("Glim Live Preview: " + error);
             }
             if (complete) { renderThread?.Join(); Reset(); return; }
-            if (!running || cancelRequested || EditorApplication.timeSinceStartup < nextUpdate) return;
-            nextUpdate = EditorApplication.timeSinceStartup + 0.1;
+            if (!running || cancelRequested) return;
             try {
+                // Submit completed atlas readbacks on the next editor update.
+                // PreviewMaterials throttles scans independently.
+                _context.UpdatePreviewMaterials();
+                double now = EditorApplication.timeSinceStartup;
+                if (now < nextUpdate) return;
+                nextUpdate = now + 0.1;
                 _context.UpdatePreviewSettings();
                 _context.UpdatePreviewLights();
-                _context.UpdatePreviewMaterials();
                 _context.UpdatePreviewSkybox();
                 _context.UpdatePreviewGeometry();
             }
             catch (Exception e) { LastError = e.Message; Debug.LogException(e); StopPreview(); }
         }
 
-        public static void Start(GlimLightmapper baker, Bindings.GlimConfig config, SceneView previewView = null)
+        public static void Start(GlimLightmapper baker, Bindings.GlimConfig config, SceneView previewView = null,
+            bool fastMetaCapture = false)
         {
             if (!config.is_preview) throw new ArgumentException("The add-on only supports preview rendering.");
             if (running || renderThread != null) throw new InvalidOperationException("Stop the current preview before opening another.");
-            if (Application.platform != RuntimePlatform.WindowsEditor &&
-                Application.platform != RuntimePlatform.LinuxEditor)
-                throw new PlatformNotSupportedException(
-                    "Glim Live Preview requires the Windows or Linux editor.");
+            var compatibility = LivePreviewWindow.CompatibilityError();
+            if (compatibility != null) throw new InvalidOperationException(compatibility);
             if (EditorApplication.isPlayingOrWillChangePlaymode) throw new InvalidOperationException("Open the preview in Edit mode.");
-            if (global::Glim.Bake.IsBaking) throw new InvalidOperationException("Wait for Glim's bake or preview to finish first.");
+            bool glimBusy = global::Glim.Bake.IsBaking;
+#if GLIM_013_OR_NEWER
+            glimBusy |= global::Glim.Bake.IsPreviewing;
+#endif
+            if (glimBusy) throw new InvalidOperationException("Wait for Glim's bake or preview to finish first.");
             if (!baker || !baker.group) throw new ArgumentException("Select a Glim Lightmapper with a lightmap group.");
             if (string.IsNullOrEmpty(baker.gameObject.scene.path)) throw new InvalidOperationException("Save the scene before starting the preview.");
             LastError = null;
             while (errors.TryDequeue(out _)) { }
             bool embedded = previewView != null;
             try {
-                _context = new BakeContext(baker, config);
-                if (embedded) PreviewViewport.Attach(previewView, baker.previewWidth, baker.previewHeight);
+                _context = new BakeContext(baker, config, fastMetaCapture);
+                if (embedded) PreviewViewport.Attach(previewView, config.preview_settings.width, config.preview_settings.height);
             }
             catch { Reset(); throw; }
             var ctx = _context;

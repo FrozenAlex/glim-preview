@@ -23,10 +23,12 @@ namespace FrozenAlex.GlimPreview
         public GlimLightmapGroup groupAsset;
         internal Renderer[] sourceRenderers;
         internal Renderer[] previewRenderers;
+        internal readonly bool fastMetaCapture;
 
-        public BakeContextGroup(GlimLightmapGroup group, IList<Renderer> renderers)
+        public BakeContextGroup(GlimLightmapGroup group, IList<Renderer> renderers, bool fastMetaCapture = false)
         {
             groupAsset = group;
+            this.fastMetaCapture = fastMetaCapture;
 
             settings = new Bindings.LightmapSettings(group);
 
@@ -35,8 +37,16 @@ namespace FrozenAlex.GlimPreview
 
             // The two atlases are independent, so issue both readbacks before blocking on
             // either and let them overlap rather than stalling on each in turn.
+#if GLIM_013_OR_NEWER
+            using var conservativeMeshes = new ConservativeMeshCache((int)settings.width);
+            var albedoRequest = metaAlbedo.CreateAtlas(renderers, MetaTexture.AtlasType.Albedo,
+                conservativeMeshes: conservativeMeshes, fastCapture: fastMetaCapture);
+            var emissionRequest = metaEmission.CreateAtlas(renderers, MetaTexture.AtlasType.Emission,
+                conservativeMeshes: conservativeMeshes, fastCapture: fastMetaCapture);
+#else
             var albedoRequest = metaAlbedo.CreateAtlas(renderers, MetaTexture.AtlasType.Albedo);
             var emissionRequest = metaEmission.CreateAtlas(renderers, MetaTexture.AtlasType.Emission);
+#endif
 
             albedoRequest.WaitForCompletion();
             emissionRequest.WaitForCompletion();
@@ -343,7 +353,7 @@ namespace FrozenAlex.GlimPreview
             return depth;
         }
 
-        public BakeContext(GlimLightmapper lightmapper, Bindings.GlimConfig config)
+        public BakeContext(GlimLightmapper lightmapper, Bindings.GlimConfig config, bool fastMetaCapture = false)
         {
             this.lightmapMode = lightmapper.lightmapMode;
             this.reflectionProbesSuperSampling = lightmapper.reflectionProbesSuperSampling;
@@ -783,7 +793,7 @@ namespace FrozenAlex.GlimPreview
                     mrDataOffset = rendererData.arraySize;
                 }
 
-                var contextGroup = new BakeContextGroup(lightmapGroup, rendererArray);
+                var contextGroup = new BakeContextGroup(lightmapGroup, rendererArray, isPreview && fastMetaCapture);
                 if (isPreview)
                 {
                     contextGroup.sourceRenderers = sourceRenderers.ToArray();

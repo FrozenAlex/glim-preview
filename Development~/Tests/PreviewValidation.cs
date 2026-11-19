@@ -13,6 +13,7 @@ namespace FrozenAlex.GlimPreview
 {
     public static class PreviewValidation
     {
+        static readonly bool fastMetaCapture = Environment.GetEnvironmentVariable("GLIM_TEST_FAST_META") == "1";
         static Material emitter;
         static ColorGrading grading;
         static MeshRenderer renderer;
@@ -44,6 +45,7 @@ namespace FrozenAlex.GlimPreview
                 RenderSettings.ambientIntensity = 0;
                 RenderSettings.defaultReflectionResolution = 16;
                 CheckHdrDisplayShader();
+                CheckMetaCapture();
                 var quad = GameObject.CreatePrimitive(PrimitiveType.Quad);
                 quad.name = "Emission test";
                 quad.transform.localScale = Vector3.one * 6;
@@ -64,8 +66,6 @@ namespace FrozenAlex.GlimPreview
                 AssetDatabase.CreateAsset(group, "Assets/Group.asset");
                 baker = new GameObject("Glim").AddComponent<GlimLightmapper>();
                 baker.group = group;
-                baker.previewWidth = 128;
-                baker.previewHeight = 128;
                 EditorSceneManager.SaveScene(UnityEngine.SceneManagement.SceneManager.GetActiveScene(), "Assets/PreviewTest.unity");
                 var main = new GameObject("Main Camera"); main.tag = "MainCamera";
                 main.AddComponent<Camera>().allowHDR = true;
@@ -92,7 +92,7 @@ namespace FrozenAlex.GlimPreview
                     true, true, 1, new Bindings.LightmapSettings(128, 128, false, false, false, false),
                     camera.transform.position, camera.transform.forward, 1, baker.lightFalloff, false,
                     baker.lightmapMode, 0, 1, 0, 1, 0, 1, 4, 0.05f, true, true);
-                Bake.Start(baker, config, view);
+                Bake.Start(baker, config, view, fastMetaCapture);
                 if (renderer.lightmapScaleOffset != originalST) throw new Exception("Preview changed original lightmap UVs");
                 deadline = EditorApplication.timeSinceStartup + 150;
                 EditorApplication.update += Tick;
@@ -116,7 +116,7 @@ namespace FrozenAlex.GlimPreview
                 if (stage == 13)
                 {
                     if (Bake.IsPreviewRunning || ReadContext() != null) return;
-                    Bake.Start(baker, config, view);
+                    Bake.Start(baker, config, view, fastMetaCapture);
                     stage = 14; changedAt = now;
                     return;
                 }
@@ -370,6 +370,84 @@ namespace FrozenAlex.GlimPreview
                 throw new Exception("Object edits automatically rebuilt the preview");
         }
 
+        static void CheckMetaCapture()
+        {
+            const int resolution = 64;
+            var testObject = new GameObject("META test") { hideFlags = HideFlags.HideAndDontSave };
+            var mesh = new Mesh();
+            var material = new Material(Shader.Find("Standard"));
+            var group = ScriptableObject.CreateInstance<GlimLightmapGroup>();
+            try
+            {
+                mesh.vertices = new[] { Vector3.zero, Vector3.right, Vector3.up };
+                mesh.uv2 = new[] { new Vector2(.2f, .2f), new Vector2(.3f, .2f), new Vector2(.2f, .3f) }
+                    .Select(uv => uv / resolution).ToArray();
+                mesh.triangles = new[] { 0, 1, 2 };
+                mesh.RecalculateNormals();
+                testObject.AddComponent<MeshFilter>().sharedMesh = mesh;
+                var testRenderer = testObject.AddComponent<MeshRenderer>();
+                testRenderer.sharedMaterial = material;
+                testRenderer.lightmapScaleOffset = new Vector4(1, 1, 0, 0);
+                material.color = Color.red;
+                group.resolution = global::Glim.Resolution._64;
+                var renderers = new Renderer[] { testRenderer };
+                var atlas = new BakeContextGroup(group, renderers)
+                {
+                    sourceRenderers = renderers,
+                    previewRenderers = renderers,
+                };
+
+#if GLIM_013_OR_NEWER
+                using var reference = new global::Glim.MetaTexture(resolution, global::Glim.MetaTexture.AtlasType.Albedo);
+                using var expanded = new ConservativeMeshCache(resolution);
+                var expected = reference.CreateAtlas(renderers, global::Glim.MetaTexture.AtlasType.Albedo, expanded);
+                expected.WaitForCompletion();
+                using var jitterOnly = new MetaTexture(resolution, MetaTexture.AtlasType.Albedo);
+                var regular = jitterOnly.CreateAtlas(renderers, MetaTexture.AtlasType.Albedo);
+                regular.WaitForCompletion();
+                if (expected.hasError || regular.hasError ||
+                    !atlas.albedo.SequenceEqual(expected.GetData<Color32>().ToArray()) ||
+                    atlas.albedo.SequenceEqual(regular.GetData<Color32>().ToArray()))
+                    throw new Exception("The conservative preview atlas did not match Glim or did not cover the thin triangle.");
+
+                var fastAtlas = new BakeContextGroup(group, renderers, fastMetaCapture: true)
+                {
+                    sourceRenderers = renderers,
+                    previewRenderers = renderers,
+                };
+                if (!atlas.albedo.SequenceEqual(fastAtlas.albedo))
+                    throw new Exception("Faster META capture lost coverage of the thin triangle.");
+                CheckMetaTiming(fastAtlas, material, scanStep: 0.11);
+#endif
+                CheckMetaTiming(atlas, material, scanStep: 0.36);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(testObject);
+                UnityEngine.Object.DestroyImmediate(mesh);
+                UnityEngine.Object.DestroyImmediate(material);
+                UnityEngine.Object.DestroyImmediate(group);
+            }
+        }
+
+        static void CheckMetaTiming(BakeContextGroup atlas, Material material, double scanStep)
+        {
+            material.color = Color.red;
+            using var tracker = new PreviewMaterials(new System.Collections.Generic.List<BakeContextGroup> { atlas });
+            const int editCount = 4;
+            for (int i = 0; i < editCount; i++)
+            {
+                material.color = Color.Lerp(Color.blue, Color.green, i / (editCount - 1f));
+                tracker.Update(i * scanStep);
+            }
+            tracker.Update((editCount - 0.5) * scanStep);
+            if (tracker.AlbedoCaptureCount != 0)
+                throw new Exception("Continuous or unsettled edits started a META capture.");
+            tracker.Update(editCount * scanStep);
+            if (tracker.AlbedoCaptureCount != 1 || tracker.EmissionCaptureCount != 0)
+                throw new Exception($"The settled color edit did not capture an albedo atlas within {scanStep * 1000:0} ms.");
+        }
+
         static void CheckHdrDisplayShader()
         {
             var shader = AssetDatabase.LoadAssetAtPath<Shader>("Packages/com.frozenalex.glim-preview/Editor/PreviewComposite.shader");
@@ -467,7 +545,7 @@ namespace FrozenAlex.GlimPreview
             Bake.StopPreview();
             if (error == null && renderer && renderer.GetComponentsInChildren<MeshRenderer>(true).Length != 1)
                 error = new Exception("Preview renderer copies were not cleaned up");
-            string result = error == null ? "PASS: HDR exposure and diagnostic bands, OIDN surface denoising with exact primary emission and HDR preservation, diagnostics bypass grading/opacity/denoising, live albedo/emission and color grading, color/texture/Undo updates, no idle captures or emission-triggered albedo captures, movement/Undo, no automatic mesh rebuild, manual restart, baked UV preservation and copy cleanup." : error.ToString();
+            string result = error == null ? "PASS: HDR exposure and diagnostic bands, OIDN surface denoising with exact primary emission and HDR preservation, diagnostics bypass grading/opacity/denoising, live albedo/emission and color grading, color/texture/Undo updates, META capture coalescing, no idle captures or emission-triggered albedo captures, movement/Undo, no automatic mesh rebuild, manual restart, baked UV preservation and copy cleanup." : error.ToString();
             File.WriteAllText(Path.Combine(resultDir, "result.txt"), result);
             Debug.Log(result);
             EditorApplication.Exit(error == null ? 0 : 1);

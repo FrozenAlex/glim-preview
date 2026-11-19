@@ -10,7 +10,7 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (!$UnityProject) { $UnityProject = Join-Path $repositoryRoot '../..' }
 $projectRoot = (Resolve-Path -LiteralPath $UnityProject).Path
 if (!(Test-Path -LiteralPath (Join-Path $projectRoot 'ProjectSettings/ProjectVersion.txt'))) {
-    throw 'Pass -UnityProject with a Unity project containing Glim 0.12 and the post-processing package.'
+    throw 'Pass -UnityProject with a Unity project containing Glim and the post-processing package.'
 }
 $work = Join-Path $PSScriptRoot '.work'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -44,14 +44,15 @@ foreach ($name in @('Editor', 'Editor.meta', 'package.json', 'package.json.meta'
     $source = Join-Path $addonSource $name
     if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $testAddon -Recurse }
 }
-@{
-    name = 'com.z3y.glim.editor'; references = @('com.z3y.glim.runtime')
-    includePlatforms = @('Editor'); allowUnsafeCode = $true
-} | ConvertTo-Json | Set-Content (Join-Path $basePackage 'Editor/com.z3y.glim.editor.asmdef')
-@{
-    name = 'FrozenAlex.GlimPreview.Editor'; references = @('com.z3y.glim.runtime', 'com.z3y.glim.editor', 'Unity.Postprocessing.Runtime')
-    includePlatforms = @('Editor'); allowUnsafeCode = $true
-} | ConvertTo-Json | Set-Content (Join-Path $testAddon 'Editor/FrozenAlex.GlimPreview.Editor.asmdef')
+$baseAssemblyPath = Join-Path $basePackage 'Editor/com.z3y.glim.editor.asmdef'
+$baseAssembly = Get-Content $baseAssemblyPath -Raw | ConvertFrom-Json
+$baseAssembly.references = @((@('com.z3y.glim.runtime') + @($baseAssembly.references | Where-Object { $_ -notlike 'GUID:*' })) | Select-Object -Unique)
+$baseAssembly | ConvertTo-Json -Depth 8 | Set-Content $baseAssemblyPath
+
+$addonAssemblyPath = Join-Path $testAddon 'Editor/FrozenAlex.GlimPreview.Editor.asmdef'
+$addonAssembly = Get-Content $addonAssemblyPath -Raw | ConvertFrom-Json
+$addonAssembly.references = @('com.z3y.glim.runtime', 'com.z3y.glim.editor', 'Unity.Postprocessing.Runtime')
+$addonAssembly | ConvertTo-Json -Depth 8 | Set-Content $addonAssemblyPath
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Tests/$Validation.cs") -Destination (Join-Path $testAddon "Editor/$Validation.cs")
 $manifest = Get-Content (Join-Path $projectRoot 'Packages/manifest.json') -Raw | ConvertFrom-Json
 $dependencies = @{}
@@ -59,6 +60,14 @@ foreach ($property in $manifest.dependencies.PSObject.Properties) {
     if ($property.Name.StartsWith('com.unity.modules.')) { $dependencies[$property.Name] = $property.Value }
 }
 $dependencies['com.unity.postprocessing'] = 'file:' + $postProcessing.FullName.Replace('\', '/')
+$metaDependencies = @{ 'com.unity.burst' = 'Unity.Burst'; 'com.unity.mathematics' = 'Unity.Mathematics' }
+foreach ($package in $metaDependencies.Keys) {
+    if ($baseAssembly.references -contains $metaDependencies[$package]) {
+        $installed = Get-ChildItem (Join-Path $projectRoot 'Library/PackageCache') -Directory -Filter "$package@*" | Select-Object -First 1
+        if (!$installed) { throw "The test requires $package." }
+        $dependencies[$package] = 'file:' + $installed.FullName.Replace('\', '/')
+    }
+}
 @{ dependencies = $dependencies } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $testRoot 'Packages/manifest.json')
 $logPath = Join-Path $testRoot 'unity.log'
 $arguments = @('-batchmode', '-projectPath', ('"' + $testRoot + '"'), '-executeMethod', "FrozenAlex.GlimPreview.$Validation.Run", '-logFile', ('"' + $logPath + '"'))

@@ -43,7 +43,11 @@ namespace FrozenAlex.GlimPreview
             Emission,
         }
 
-        public AsyncGPUReadbackRequest CreateAtlas(IList<Renderer> renderers, AtlasType type, Action<AsyncGPUReadbackRequest> onComplete = null)
+        public AsyncGPUReadbackRequest CreateAtlas(IList<Renderer> renderers, AtlasType type, Action<AsyncGPUReadbackRequest> onComplete = null
+#if GLIM_013_OR_NEWER
+            , ConservativeMeshCache conservativeMeshes = null, bool fastCapture = false
+#endif
+        )
         {
             using var cmd = new CommandBuffer();
             cmd.SetRenderTarget(_rt);
@@ -57,7 +61,11 @@ namespace FrozenAlex.GlimPreview
                 cmd.ClearRenderTarget(true, true, Color.black);
             }
 
-            RenderMeta(renderers, type, cmd);
+            RenderMeta(renderers, type, cmd
+#if GLIM_013_OR_NEWER
+                , conservativeMeshes, fastCapture
+#endif
+            );
 
             Graphics.ExecuteCommandBuffer(cmd);
 
@@ -155,7 +163,11 @@ namespace FrozenAlex.GlimPreview
             }
         }
 
-        void RenderMeta(IList<Renderer> renderers, AtlasType type, CommandBuffer cmd)
+        void RenderMeta(IList<Renderer> renderers, AtlasType type, CommandBuffer cmd
+#if GLIM_013_OR_NEWER
+            , ConservativeMeshCache conservativeMeshes, bool fastCapture
+#endif
+        )
         {
             float near = 0.01f;
             float far = 100f;
@@ -230,95 +242,111 @@ namespace FrozenAlex.GlimPreview
             bool flipY = !SystemInfo.graphicsUVStartsAtTop;
 
 
-            // Renderers are the outer loop so the per-renderer lookups below happen once
-            // instead of once per jitter offset. Each renderer owns a distinct atlas region
-            // via lightmapScaleOffset and its own offsets still run in order, so the draw
-            // results are unchanged.
-            for (int rendererIndex = 0; rendererIndex < renderers.Count; rendererIndex++)
+            var items = new List<MetaDrawItem>(renderers.Count);
+            foreach (var renderer in renderers)
             {
-                var renderer = renderers[rendererIndex];
-                if (!renderer) continue;
-                var filter = renderer.GetComponent<MeshFilter>();
-                if (!filter) continue;
+                if (!renderer || !renderer.TryGetComponent<MeshFilter>(out var filter)) continue;
                 var mesh = filter.sharedMesh;
-
-                if (!mesh)
-                {
-                    continue;
-                }
-
-                Matrix4x4 localToWorld = renderer.localToWorldMatrix;
-                MaterialPropertyBlock mpb = new();
-                renderer.GetPropertyBlock(mpb);
+                if (!mesh) continue;
                 if (renderer is MeshRenderer mr)
                 {
-                    var enlightenVertexStream = mr.enlightenVertexStream;
-                    var additionalVertexStreams = mr.additionalVertexStreams;
-                    if (enlightenVertexStream)
-                    {
-                        if (enlightenVertexStream.HasVertexAttribute(VertexAttribute.TexCoord1))
-                        {
-                            mesh = enlightenVertexStream;
-                        }
-                    }
-                    else if (additionalVertexStreams)
-                    {
-                        if (additionalVertexStreams.HasVertexAttribute(VertexAttribute.TexCoord1))
-                        {
-                            mesh = additionalVertexStreams;
-                        }
-                    }
+                    var stream = mr.enlightenVertexStream;
+                    if (!stream) stream = mr.additionalVertexStreams;
+                    if (stream && stream.HasVertexAttribute(VertexAttribute.TexCoord1)) mesh = stream;
                 }
 
-                var sharedMaterials = renderer.sharedMaterials;
-                int submeshCount = mesh.subMeshCount;
+                var materials = renderer.sharedMaterials;
+                var passes = new int[Mathf.Min(materials.Length, mesh.subMeshCount)];
+                bool draws = false;
+                for (int i = 0; i < passes.Length; i++)
+                {
+                    var mat = materials[i];
+                    passes[i] = mat && (type == AtlasType.Albedo || IsMaterialEmissive(mat))
+                        ? mat.FindPass("META") : -1;
+                    draws |= passes[i] >= 0;
+                }
+                if (!draws) continue;
 
-                var baseSo = renderer.lightmapScaleOffset;
-
+                var block = new MaterialPropertyBlock();
+                renderer.GetPropertyBlock(block);
+                var lightmapSo = renderer.lightmapScaleOffset;
+                var drawSo = lightmapSo;
                 if (flipY)
                 {
-                    baseSo.y = -baseSo.y;
-                    baseSo.w = 1.0f - baseSo.w;
+                    drawSo.y = -drawSo.y;
+                    drawSo.w = 1.0f - drawSo.w;
                 }
-
-                for (int offsetIndex = 0; offsetIndex < uvOffset.Length; offsetIndex++)
+                items.Add(new MetaDrawItem
                 {
-                    var so = baseSo;
-                    so.z += uvOffset[offsetIndex].z;
-                    so.w += uvOffset[offsetIndex].w;
+                    mesh = mesh,
+                    localToWorld = renderer.localToWorldMatrix,
+                    properties = block,
+                    materials = materials,
+                    passes = passes,
+                    lightmapSo = lightmapSo,
+                    drawSo = drawSo,
+                });
+            }
 
-                    cmd.SetGlobalVector(unity_LightmapST, so);
-
-                    for (int submeshIndex = 0; submeshIndex < sharedMaterials.Length; submeshIndex++)
-                    {
-                        if (submeshIndex >= submeshCount)
-                        {
-                            break;
-                        }
-
-                        var mat = sharedMaterials[submeshIndex];
-
-                        if (!mat)
-                        {
-                            continue;
-                        }
-
-
-                        if (type == AtlasType.Emission)
-                        {
-                            if (!IsMaterialEmissive(mat))
-                            {
-                                continue;
-                            }
-                        }
-                        int meta = mat.FindPass("META");
-                        if (meta >= 0)
-                        {
-                            cmd.DrawMesh(mesh, localToWorld, mat, submeshIndex, meta, mpb);
-                        }
-                    }
+#if GLIM_013_OR_NEWER
+            if (conservativeMeshes != null)
+            {
+                var requests = new List<(Mesh, Vector4)>(items.Count);
+                foreach (var item in items) requests.Add((item.mesh, item.lightmapSo));
+                conservativeMeshes.Build(requests);
+                // Fill texels touched by triangle edges before regular META draws overwrite them.
+                for (int i = 0; i < items.Count; i++)
+                {
+                    var item = items[i];
+                    var expanded = conservativeMeshes.Get(item.mesh, item.lightmapSo);
+                    if (!expanded) continue;
+                    cmd.SetGlobalVector(unity_LightmapST, item.drawSo);
+                    DrawMetaSubmeshes(cmd, expanded, item);
+                    item.centerOnly = fastCapture;
+                    items[i] = item;
                 }
             }
+#endif
+            foreach (var item in items)
+            {
+#if GLIM_013_OR_NEWER
+                if (item.centerOnly)
+                {
+                    cmd.SetGlobalVector(unity_LightmapST, item.drawSo);
+                    DrawMetaSubmeshes(cmd, item.mesh, item);
+                    continue;
+                }
+#endif
+                foreach (var offset in uvOffset)
+                {
+                    var so = item.drawSo;
+                    so.z += offset.z;
+                    so.w += offset.w;
+                    cmd.SetGlobalVector(unity_LightmapST, so);
+                    DrawMetaSubmeshes(cmd, item.mesh, item);
+                }
+            }
+        }
+
+        struct MetaDrawItem
+        {
+            public Mesh mesh;
+            public Matrix4x4 localToWorld;
+            public MaterialPropertyBlock properties;
+            public Material[] materials;
+            public int[] passes;
+#if GLIM_013_OR_NEWER
+            public bool centerOnly;
+#endif
+            public Vector4 lightmapSo, drawSo;
+        }
+
+        static void DrawMetaSubmeshes(CommandBuffer cmd, Mesh mesh, in MetaDrawItem item)
+        {
+            int count = Mathf.Min(item.passes.Length, mesh.subMeshCount);
+            for (int i = 0; i < count; i++)
+                if (item.passes[i] >= 0)
+                    cmd.DrawMesh(mesh, item.localToWorld, item.materials[i], i, item.passes[i], item.properties);
         }
 
         public static bool IsMaterialEmissive(Material mat)

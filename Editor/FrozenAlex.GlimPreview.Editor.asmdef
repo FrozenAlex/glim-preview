@@ -21,6 +21,11 @@
   "defineConstraints": [],
   "versionDefines": [
     {
+      "name": "io.github.z3y.glim",
+      "expression": "0.13.0",
+      "define": "GLIM_013_OR_NEWER"
+    },
+    {
       "name": "com.z3y.xatlaslightmap",
       "expression": "0.3.0",
       "define": "XATLAS_LIGHTMAP_INCLUDED"

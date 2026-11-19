@@ -12,6 +12,13 @@ namespace FrozenAlex.GlimPreview
         [SerializeField] GlimLightmapper lightmapper;
         [SerializeField] string lightmapperId;
         [SerializeField] bool selectionCleared;
+#if GLIM_013_OR_NEWER
+        [SerializeField] int previewWidth = 1024;
+        [SerializeField] int previewHeight = 1024;
+        [SerializeField] int previewSamples = 512;
+        [SerializeField] int previewBounces = 2;
+        [SerializeField] bool fastMetaCapture;
+#endif
         double nextRestore;
         string error;
 
@@ -27,7 +34,11 @@ namespace FrozenAlex.GlimPreview
 
         void OnEnable()
         {
+#if GLIM_013_OR_NEWER
+            minSize = new Vector2(340, 400);
+#else
             minSize = new Vector2(340, 320);
+#endif
             EditorSceneManager.sceneClosing += OnSceneClosing;
             EditorSceneManager.sceneOpened += OnSceneOpened;
             RememberLightmapper();
@@ -106,12 +117,20 @@ namespace FrozenAlex.GlimPreview
         void OnGUI()
         {
             EditorGUILayout.LabelField("Glim Live Preview", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Preview directly in Scene View with the scene's color correction. Uses the selected Glim Lightmapper's preview settings.", MessageType.Info);
+            EditorGUILayout.HelpBox("Preview directly in Scene View with the scene's color correction.", MessageType.Info);
             using (new EditorGUI.DisabledScope(Bake.IsPreviewRunning))
             {
                 EditorGUI.BeginChangeCheck();
                 var selected = (GlimLightmapper)EditorGUILayout.ObjectField("Lightmapper", lightmapper, typeof(GlimLightmapper), true);
                 if (EditorGUI.EndChangeCheck()) SetLightmapper(selected);
+#if GLIM_013_OR_NEWER
+                fastMetaCapture = EditorGUILayout.Toggle(new GUIContent("Faster META capture",
+                    "Updates mesh emission colors faster during preview, with slightly lower quality around UV edges."), fastMetaCapture);
+                previewWidth = Mathf.Clamp(EditorGUILayout.DelayedIntField("Preview width", previewWidth), 64, 2048);
+                previewHeight = Mathf.Clamp(EditorGUILayout.DelayedIntField("Preview height", previewHeight), 64, 2048);
+                previewSamples = Mathf.Clamp(EditorGUILayout.DelayedIntField("Preview samples", previewSamples), 1, 65536);
+                previewBounces = Mathf.Clamp(EditorGUILayout.DelayedIntField("Preview bounces", previewBounces), 0, 127);
+#endif
             }
 
             EditorGUI.BeginChangeCheck();
@@ -147,8 +166,9 @@ namespace FrozenAlex.GlimPreview
             if (Application.platform != RuntimePlatform.WindowsEditor && Application.platform != RuntimePlatform.LinuxEditor)
                 return "This add-on supports the Windows x64 and Linux x64 editors.";
             var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(GlimLightmapper).Assembly);
-            if (package == null || !package.version.StartsWith("0.12.", StringComparison.Ordinal))
-                return "This add-on supports Glim 0.12.x. Install a matching add-on version after upgrading Glim.";
+            if (package == null || !(package.version.StartsWith("0.12.", StringComparison.Ordinal) ||
+                                    package.version.StartsWith("0.13.", StringComparison.Ordinal)))
+                return "This add-on supports Glim 0.12.x and 0.13.x.";
             return null;
         }
 
@@ -160,17 +180,30 @@ namespace FrozenAlex.GlimPreview
                 if (!sceneView) sceneView = GetWindow<SceneView>();
                 if (lightmapper.gameObject.scene != SceneManager.GetActiveScene())
                     throw new InvalidOperationException("Select a lightmapper in the active scene.");
-                Bake.Start(lightmapper, CreateConfig(lightmapper, sceneView.camera), inScene ? sceneView : null);
+#if GLIM_013_OR_NEWER
+                var config = CreateConfig(lightmapper, sceneView.camera, (uint)previewWidth, (uint)previewHeight,
+                    (uint)previewSamples, (uint)previewBounces, global::Glim.PreviewWindow.ThrottleMs);
+                Bake.Start(lightmapper, config, inScene ? sceneView : null, fastMetaCapture);
+#else
+                var config = CreateConfig(lightmapper, sceneView.camera, lightmapper.previewWidth, lightmapper.previewHeight,
+                    lightmapper.previewSamples, lightmapper.previewBounces, lightmapper.previewThrottle);
+                Bake.Start(lightmapper, config, inScene ? sceneView : null);
+#endif
             }
             catch (Exception e) { error = e.Message; Debug.LogException(e); }
         }
 
-        internal static Bindings.GlimConfig CreateConfig(GlimLightmapper baker, Camera camera) => new(
-            Bindings.CoordinateSystem.Unity, baker.previewSamples, baker.previewSamples, baker.previewSamples,
-            baker.previewBounces, true, baker.hardwareRayTracing, baker.previewThrottle,
-            new Bindings.LightmapSettings(baker.previewWidth, baker.previewHeight, false, false, false, false),
+        internal static Bindings.GlimConfig CreateConfig(GlimLightmapper baker, Camera camera, uint width, uint height,
+            uint samples, uint bounces, uint throttle) => new(
+            Bindings.CoordinateSystem.Unity, samples, samples, samples, bounces, true, baker.hardwareRayTracing, throttle,
+            new Bindings.LightmapSettings(width, height, false, false, false, false),
             camera.transform.position, camera.transform.forward, baker.lightProbeSamples,
+#if GLIM_013_OR_NEWER
+            // The independent preview renderer still uses the Glim 0.12.2 ABI.
+            baker.lightFalloff, false, baker.lightmapMode,
+#else
             baker.lightFalloff, baker.multipleImportanceSampling, baker.lightmapMode,
+#endif
             RenderSettings.ambientIntensity, baker.indirectMultiplier, 0, baker.emissiveMultiplier,
             baker.ambientOcclusion, baker.ambientOcclusionRange, baker.coverageMaxSamples,
             baker.coverageMinThreshold, baker.antiAliasing, baker.leakDetection);

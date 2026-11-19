@@ -1,6 +1,6 @@
 # Glim Live Preview
 
-Independent editor add-on for **Glim 0.12.x**, Unity 2022.3, Windows x64 and Linux x64.
+Independent editor add-on for **Glim 0.12.x and 0.13.x**, Unity 2022.3, Windows x64 and Linux x64.
 These are the two platforms built by upstream Glim. Linux builds target Ubuntu
 22.04 or newer (glibc 2.35+), with a Vulkan-capable graphics driver.
 Optional Linux denoising needs `libOpenImageDenoise.so.2` on the library search path.
@@ -12,15 +12,16 @@ installed package, inspector, bake renderer, and scene components in place.
 Add [FrozenAlex's package listing](https://frozenalex.com/vpm/) and
 [z3y's listing](https://z3y.github.io/vpm-package-listing/) to Creator Companion.
 Then add **Glim Live Preview** to your Unity 2022.3 project. The add-on requires
-Glim 0.12.x from z3y's listing. The direct listing URL is
+Glim 0.12.x or 0.13.x from z3y's listing. The direct listing URL is
 `https://frozenalex.com/vpm/index.json`.
 
 ## Open the preview
 
 1. Open **Tools в†’ Glim в†’ Live Preview**, or use **Live Preview** in a Glim
    Lightmapper component's context menu.
-2. Select the active scene's Glim Lightmapper. Its group, preview resolution,
-   samples, bounce count, and ray-tracing settings are used. Save the scene first.
+2. Select the active scene's Glim Lightmapper and save the scene. With Glim 0.13,
+   set the resolution, samples and bounces in the Live Preview window. With
+   Glim 0.12, these settings are on the Lightmapper component.
 3. Click **Preview in Scene View**. Navigate the Scene camera normally.
 4. Leave **Scene color correction / effects** enabled to use the Scene View's
    existing post-processing. The HDR preview is composited before image effects,
@@ -55,10 +56,19 @@ refresh albedo. Idle polling does not render atlases.
 Albedo tracking covers `_Color`, `_BaseColor`, `_MainTex`, `_BaseMap`, and shader
 properties marked `[MainColor]` or `[MainTexture]`, including texture tiling,
 offset, and content updates. The shader's META pass supplies the actual pixels.
-Updates share the existing 0.35-second scan interval and one-atlas-in-flight limit.
-Only the affected group's changed atlas is rendered, read back asynchronously,
-and uploaded; each atlas is still a full 4-byte-per-texel transfer. Identical
-albedo pixels skip the native upload and accumulation reset.
+Material edits settle for one scan interval before capture. The interval is
+350 ms in the default mode and 100 ms with **Faster META capture**. One atlas
+readback can be in flight. Capture and upload work covers the changed
+group's full atlas at four bytes per texel. Identical albedo pixels skip the
+native upload and accumulation reset.
+
+With Glim 0.13, albedo and emission use conservative META rasterization to
+cover texels touched by thin triangles. The preview reuses expanded meshes for
+the most recently edited group across its albedo and emission captures.
+Enable **Faster META capture** before starting the preview to use one regular
+draw after the conservative pass on meshes that support expansion. This
+reduces padding around UV edges. Atlas resolution and transfer size stay the
+same.
 
 Skybox material swaps, exposure/tint/rotation, texture edits, and built-in procedural
 sun changes refresh the preview's environment lighting and background. Cubemap
@@ -83,7 +93,8 @@ copies, preserving the scene's baked lightmap UVs.
 
 This package is separate from `io.github.z3y.glim`, so updating Glim does not replace
 the add-on files. The bundled preview renderer is based on Glim 0.12.2.
-The add-on accepts Glim 0.12.x.
+The Unity integration accepts Glim 0.12.x and 0.13.x. Glim 0.13 features such
+as the emissive light tree and transmission are available in Glim's renderer.
 
 The repository's `Development~` directory contains the native patch,
 pinned upstream revision, build script, and isolated Unity visual regression.
@@ -110,14 +121,14 @@ script currently targets Windows.
 ```
 
 For a checkout outside a Unity project, pass `-UnityProject 'path/to/project'`
-to the validation script. That project must have Glim 0.12 and Unity's
+to the validation script. That project must have Glim and Unity's
 post-processing package installed. See [development notes](Development~/README.md).
 
 ## Publishing
 
 Update `package.json`'s version, commit and push, then run **Actions → Build Release**
 with **publish** enabled. Alternatively, push a matching version tag such as
-`v0.1.6`. Leaving **publish** disabled builds downloadable workflow artifacts only.
+`v0.1.7`. Leaving **publish** disabled builds downloadable workflow artifacts only.
 The workflow builds the patched Rust renderer on Windows and Ubuntu, packages
 both native libraries in one VPM ZIP, and publishes the ZIP, manifest,
 checksum, and signed build provenance bundle. The VPM listing checks for releases hourly; its **Build Repo Listing**

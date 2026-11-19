@@ -87,15 +87,11 @@ namespace FrozenAlex.GlimPreview
             AssetDatabase.CreateAsset(group, "Assets/Group.asset");
             var baker = new GameObject("Glim").AddComponent<GlimLightmapper>();
             baker.group = group;
-            baker.previewWidth = baker.previewHeight = 64;
-            baker.previewSamples = 8;
-            baker.previewBounces = 0;
-            baker.previewThrottle = 1;
             EditorSceneManager.SaveScene(scene, "Assets/SkyboxTest.unity");
             view = EditorWindow.GetWindow<SceneView>();
             view.LookAtDirect(Vector3.zero, Quaternion.identity, 3);
             view.orthographic = true;
-            Bake.Start(baker, LivePreviewWindow.CreateConfig(baker, view.camera), view);
+            Bake.Start(baker, LivePreviewWindow.CreateConfig(baker, view.camera, 64, 64, 8, 0, 1), view);
             context = ReadContext();
             stage = 1;
         }

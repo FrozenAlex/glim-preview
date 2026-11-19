@@ -3,7 +3,7 @@
 This repository root is the Unity package. Install it as `Packages/com.frozenalex.glim-preview`.
 The native renderer is based on Glim **0.12.2**, revision
 `5f7a25f414f20c3a90f2a147c69cc3a64dd6c262`.
-The Unity add-on supports Glim 0.12.x.
+The Unity add-on supports Glim 0.12.x and 0.13.x.
 
 The managed source lives in `Editor/`, under its own namespace and
 assembly. It reuses Glim's runtime settings and public editor utilities. Its
@@ -99,7 +99,7 @@ To check packaging locally after building:
 
 ```powershell
 python -m unittest discover -s Development~ -p test_package_release.py -v
-python Development~/package_release.py --native-dll dist/glim_preview_addon_012_v1.dll --native-so dist/glim_preview_addon_012_v1.so --output dist/package --tag v0.1.6
+python Development~/package_release.py --native-dll dist/glim_preview_addon_012_v1.dll --native-so dist/glim_preview_addon_012_v1.so --output dist/package --tag v0.1.7
 ```
 
 For a new release, change the manifest version and push that commit. Run **Build
@@ -129,10 +129,13 @@ required. After publishing, run **Build Repo Listing** there for an immediate up
 `PreviewMaterials` caches each shader's base-color/base-texture property IDs and
 compares their values separately from emission's material CRC. Material dirty
 counts and emission flags do not invalidate albedo. Non-emissive materials are
-excluded from the emission signature. One shared 0.35-second scanner schedules
-at most one atlas readback at a time, coalescing rapid edits without increasing
-the existing transfer concurrency. Geometry validity is checked only for dirty
-captures, rather than on every idle scan.
+excluded from the emission signature. One shared scanner waits for each atlas
+hash to settle for one scan interval before rendering. The interval is 350 ms
+by default and 100 ms with Faster META capture. The editor submits a completed
+readback on its next update. Only one atlas readback can be in flight. For Glim 0.13, the initial export shares a
+conservative mesh cache between the albedo and emission atlases of each group.
+Live captures retain a cache for the last edited group and release it on group
+switch or preview shutdown.
 
 `app_update_preview_albedo` validates the group and buffer size, copies the latest
 snapshot into a bounded mailbox, and ignores identical pixel fingerprints. The

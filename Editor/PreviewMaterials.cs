@@ -18,7 +18,13 @@ namespace FrozenAlex.GlimPreview
         readonly Dictionary<Shader, (int revision, int[] colors, int[] textures)> albedoInputs = new();
         readonly List<Material> materials = new();
         readonly List<int> textureProperties = new();
-        readonly int[] submittedHashes;
+        readonly double scanInterval;
+        readonly int[] submittedHashes, observedHashes;
+        readonly double[] captureAfter;
+#if GLIM_013_OR_NEWER
+        ConservativeMeshCache conservativeMeshes;
+        int cachedGroup = -1;
+#endif
         MetaTexture.AtlasType pendingType;
         internal int AlbedoCaptureCount { get; private set; }
         internal int EmissionCaptureCount { get; private set; }
@@ -33,9 +39,12 @@ namespace FrozenAlex.GlimPreview
         public PreviewMaterials(List<BakeContextGroup> groups)
         {
             this.groups = groups;
+            scanInterval = groups.Exists(group => group.fastMetaCapture) ? 0.10 : 0.35;
             submittedHashes = new int[groups.Count * 2];
+            observedHashes = new int[submittedHashes.Length];
+            captureAfter = new double[submittedHashes.Length];
             for (int i = 0; i < submittedHashes.Length; i++)
-                submittedHashes[i] = GroupHash(groups[i / 2], (MetaTexture.AtlasType)(i % 2));
+                observedHashes[i] = submittedHashes[i] = GroupHash(groups[i / 2], (MetaTexture.AtlasType)(i % 2));
         }
 
         internal static List<MeshRenderer> CloneRenderers(List<MeshRenderer> sources, List<MeshRenderer> owned, List<int> copyIds)
@@ -194,28 +203,24 @@ namespace FrozenAlex.GlimPreview
             return true;
         }
 
-        public void Update()
+        public void Update() => Update(EditorApplication.timeSinceStartup);
+
+        internal void Update(double now)
         {
             if (pendingGroup >= 0)
             {
+                if (!readbackFinished) return;
                 if (!CanCapture(groups[pendingGroup]))
                 {
-                    // Let an already-issued readback finish without blocking
-                    // the editor, then discard it if its export is obsolete.
-                    if (!readbackFinished) return;
                     FinishCapture();
                     return;
                 }
-                if (pendingPixels == null)
+                if (readbackFailed)
                 {
-                    if (!readbackFinished) return;
-                    if (readbackFailed)
-                    {
-                        Debug.LogWarning($"Glim: {pendingType} atlas readback failed; it will be retried.");
-                        FinishCapture();
-                        nextScan = EditorApplication.timeSinceStartup + 2;
-                        return;
-                    }
+                    Debug.LogWarning($"Glim: {pendingType} atlas readback failed; it will be retried.");
+                    FinishCapture();
+                    nextScan = now + 2;
+                    return;
                 }
                 if (capture != null) { capture.Dispose(); capture = null; }
                 bool accepted = pendingType == MetaTexture.AtlasType.Albedo
@@ -225,8 +230,8 @@ namespace FrozenAlex.GlimPreview
                 submittedHashes[pendingGroup * 2 + (int)pendingType] = pendingHash;
                 FinishCapture();
             }
-            if (EditorApplication.timeSinceStartup < nextScan) return;
-            nextScan = EditorApplication.timeSinceStartup + 0.35;
+            if (now < nextScan) return;
+            nextScan = now + scanInterval;
             materialHashes.Clear();
             albedoHashes.Clear();
             for (int n = 0; n < submittedHashes.Length; n++)
@@ -236,8 +241,24 @@ namespace FrozenAlex.GlimPreview
                 var type = (MetaTexture.AtlasType)(slot % 2);
                 var group = groups[i];
                 int hash = GroupHash(group, type);
-                if (hash == submittedHashes[slot] || !CanCapture(group)) continue;
+                if (hash != observedHashes[slot])
+                {
+                    observedHashes[slot] = hash;
+                    captureAfter[slot] = now + scanInterval;
+                }
+                // Wait for a stable edit before scheduling another full atlas.
+                if (hash == submittedHashes[slot] || now < captureAfter[slot] || !CanCapture(group)) continue;
                 SyncMaterials(group);
+#if GLIM_013_OR_NEWER
+                // Only retain expanded meshes for the last edited atlas group.
+                // Albedo and emission can reuse them with the same packed UVs.
+                if (cachedGroup != i)
+                {
+                    conservativeMeshes?.Dispose();
+                    conservativeMeshes = new ConservativeMeshCache((int)group.settings.width);
+                    cachedGroup = i;
+                }
+#endif
                 capture = new MetaTexture((int)group.settings.width, type);
                 pendingType = type;
                 if (type == MetaTexture.AtlasType.Albedo) AlbedoCaptureCount++;
@@ -253,7 +274,11 @@ namespace FrozenAlex.GlimPreview
                     readbackFailed = completed.hasError;
                     if (!readbackFailed) pendingPixels = completed.GetData<byte>().ToArray();
                     readbackFinished = true;
-                });
+                }
+#if GLIM_013_OR_NEWER
+                    , conservativeMeshes, group.fastMetaCapture
+#endif
+                );
                 nextSlot = (slot + 1) % submittedHashes.Length;
                 break; // At most one atlas readback in flight; coalesce slider changes.
             }
@@ -272,6 +297,10 @@ namespace FrozenAlex.GlimPreview
             disposed = true;
             if (capture != null && !readbackFinished) request.WaitForCompletion();
             FinishCapture();
+#if GLIM_013_OR_NEWER
+            conservativeMeshes?.Dispose();
+            conservativeMeshes = null;
+#endif
         }
     }
 }
